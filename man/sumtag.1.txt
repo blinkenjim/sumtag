@@ -1,0 +1,178 @@
+SUMTAG(1)                        User Commands                       SUMTAG(1)
+
+NAME
+       sumtag - stamp files with an XXH3 checksum and metadata for corruption
+       and duplicate detection
+
+SYNOPSIS
+       sumtag [OPTIONS] [DIRECTORY...]
+
+DESCRIPTION
+       sumtag recursively scans each DIRECTORY, computes an XXH3 checksum of
+       every file's contents, and stores the checksum together with metadata
+       in an extended attribute named user.sumtag on the file. The recorded
+       metadata makes it possible to later detect silent data corruption and
+       to find duplicate files. Those higher-level analyses are left to other
+       tools, with one exception built in here: the single-pass integrity
+       check offered by --verify.
+
+       If no DIRECTORY is given, the current working directory is scanned.
+       Explicit paths replace that default; pass .  explicitly to include the
+       current directory alongside others.
+
+       For each file, sumtag reads any existing user.sumtag attribute and
+       compares the recorded modification time to the file's current mtime. If
+       they match, the file is considered up to date and is skipped.
+       Otherwise the file's contents are hashed and the attribute is written.
+
+RE-HASHING
+       A file is hashed, or re-hashed, when any of the following hold:
+
+       o  the --force option was given;
+
+       o  the user.sumtag attribute is absent or unreadable;
+
+       o  the stored modification time is older than the file's current mtime;
+
+       o  the stored schema version has a lower major number than the running
+          software;
+
+       o  a requested digest algorithm is absent from the stored metadata.
+
+OPTIONS
+       -n, --dry-run
+              Scan and report what would be done, but write nothing -- no
+              extended attributes and no database rows. Output matches a real
+              run. Cannot be combined with --force.
+
+       -q, --quiet
+              Suppress normal output. Repeat (-qq) to also suppress error
+              messages on standard error. Mutually exclusive with --verbose.
+
+       -v, --verbose
+              Explain the decision made for each file, including skips. Repeat
+              (-vv) for deep internal detail intended for debugging. Mutually
+              exclusive with --quiet.
+
+       --progress
+              Show a live within-file progress indicator for large files. If
+              it appears together with -q, whichever option appears last on
+              the command line wins, and a warning is printed to standard
+              error.
+
+       -f, --force
+              Re-hash every file unconditionally, ignoring any existing
+              metadata. Cannot be combined with --dry-run, --import, or
+              --verify.  This option does not override @sumtag-ignore markers;
+              use --no-ignore for that.
+
+       --database VALUE
+              Mirror each file's metadata into a database in addition to the
+              extended attribute, which remains the source of truth.  VALUE is
+              a SQLite file path, or a scheme:// DSN. A value matching the
+              pattern `^[a-z][a-z0-9+.-]*://' is treated as a DSN (mysql://,
+              postgresql://); any other value, including one that merely
+              contains a colon, is a SQLite file path. Only SQLite is
+              implemented; a DSN is recognised and rejected as not yet
+              supported. Database paths are stored relative to the file's
+              mount point so they survive remounting at a different location.
+
+       --import
+              Do not compute any checksum; only copy metadata already present
+              in each file's extended attribute into the database. Requires
+              --database.  Files lacking usable metadata are skipped and
+              reported. Useful for populating a database from an archive that
+              was hashed on a previous run. Cannot be combined with --force or
+              --verify.
+
+       --verify
+              Read-only integrity check: recompute each file's checksum and
+              compare it to the stored value, reporting any disagreement.
+              Nothing is written, even on a mismatch. A mismatch while the
+              stored modification time still matches the file's mtime
+              indicates silent corruption; a mismatch accompanied by a newer
+              mtime indicates an ordinary modification whose stamp is merely
+              stale. Files with no usable metadata are reported as
+              unverifiable. Cannot be combined with --database, --force, or
+              --import; combining with --dry-run is a redundant no-op and is
+              permitted. See EXIT STATUS below.
+
+       --no-ignore
+              Disregard all @sumtag-ignore marker files for this run,
+              processing every directory regardless of markers.
+
+       --version
+              Print version information and exit.
+
+       -h, --help
+              Print a usage summary and exit.
+
+IGNORE MARKERS
+       A directory containing a file named @sumtag-ignore is exempted along
+       with its entire subtree: sumtag does not descend into it, and nothing
+       beneath it is read, hashed, stamped, or mirrored to a database. The
+       marker file itself is never hashed. Only the file's presence matters;
+       its contents are ignored and reserved for future use. The exemption
+       applies in every mode and takes precedence over --force; use
+       --no-ignore to override it. A marker found at a directory named
+       directly on the command line is honoured, with a warning printed to
+       standard error.
+
+EXIT STATUS
+       Without --verify, sumtag exits 0 on success and non-zero if an error
+       prevented completion.
+
+       With --verify:
+
+       0      all checked files verified intact.
+
+       1      one or more checksum mismatches (corruption) were found.
+
+       2      unreadable files or other errors prevented a complete check.
+
+FILES
+       user.sumtag
+              Extended attribute holding each file's checksum and metadata as
+              UTF-8 JSON.
+
+       @sumtag-ignore
+              Marker file that exempts its directory and subtree (see IGNORE
+              MARKERS).
+
+EXAMPLES
+       Scan the current directory:
+
+       sumtag
+
+       Scan two archives:
+
+       sumtag /data /backup
+
+       Preview without writing anything:
+
+       sumtag -n /data
+
+       Stamp and also mirror into a SQLite database:
+
+       sumtag --database /var/lib/sumtag.sqlite /data
+
+       Import existing metadata into a database without re-reading files:
+
+       sumtag --database /var/lib/sumtag.sqlite --import /data
+
+       Verify an archive against its stored checksums:
+
+       sumtag --verify /backup
+
+NOTES
+       Timestamps are recorded in UTC with microsecond precision. Mtime
+       comparisons truncate both the stored and live values to the same
+       precision, so the comparison is symmetric.
+
+SEE ALSO
+       xattr(1), getfattr(1), setfattr(1), cksum(1)
+
+AUTHOR
+       The sumtag authors.
+
+sumtag 0.1.0                       June 2026                         SUMTAG(1)

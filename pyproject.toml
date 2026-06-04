@@ -1,0 +1,20 @@
+# Packaging for sumtag. Build backend: setuptools (see CLAUDE.md).
+# The console_scripts entry point generates a `sumtag` command on PATH.
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sumtag"
+version = "0.1.0"
+description = "Stamp files with an XXH3 checksum and metadata in an extended attribute, for silent-corruption and duplicate detection."
+requires-python = ">=3.8"
+dependencies = ["xxhash"]
+# TODO: fill in authors, license, readme, classifiers before publishing.
+
+[project.scripts]
+sumtag = "sumtag.cli:main"
+
+[tool.setuptools]
+packages = ["sumtag"]

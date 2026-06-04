@@ -1,0 +1,220 @@
+.TH SUMTAG 1 "June 2026" "sumtag 0.1.0" "User Commands"
+.SH NAME
+sumtag \- stamp files with an XXH3 checksum and metadata for corruption and duplicate detection
+.SH SYNOPSIS
+.B sumtag
+.RI [ OPTIONS ]
+.RI [ DIRECTORY .\|.\|.]
+.SH DESCRIPTION
+.B sumtag
+recursively scans each
+.IR DIRECTORY ,
+computes an XXH3 checksum of every file's contents, and stores the checksum
+together with metadata in an extended attribute named
+.B user.sumtag
+on the file. The recorded metadata makes it possible to later detect silent
+data corruption and to find duplicate files. Those higher-level analyses are
+left to other tools, with one exception built in here: the single-pass
+integrity check offered by
+.BR \-\-verify .
+.PP
+If no
+.I DIRECTORY
+is given, the current working directory is scanned. Explicit paths replace
+that default; pass
+.B .
+explicitly to include the current directory alongside others.
+.PP
+For each file, sumtag reads any existing
+.B user.sumtag
+attribute and compares the recorded modification time to the file's current
+mtime. If they match, the file is considered up to date and is skipped.
+Otherwise the file's contents are hashed and the attribute is written.
+.SH RE-HASHING
+A file is hashed, or re-hashed, when any of the following hold:
+.IP \(bu 3
+the
+.B \-\-force
+option was given;
+.IP \(bu 3
+the
+.B user.sumtag
+attribute is absent or unreadable;
+.IP \(bu 3
+the stored modification time is older than the file's current mtime;
+.IP \(bu 3
+the stored schema version has a lower major number than the running software;
+.IP \(bu 3
+a requested digest algorithm is absent from the stored metadata.
+.SH OPTIONS
+.TP
+.BR \-n ", " \-\-dry\-run
+Scan and report what would be done, but write nothing \(em no extended
+attributes and no database rows. Output matches a real run. Cannot be combined
+with
+.BR \-\-force .
+.TP
+.BR \-q ", " \-\-quiet
+Suppress normal output. Repeat
+.RB ( \-qq )
+to also suppress error messages on standard error. Mutually exclusive with
+.BR \-\-verbose .
+.TP
+.BR \-v ", " \-\-verbose
+Explain the decision made for each file, including skips. Repeat
+.RB ( \-vv )
+for deep internal detail intended for debugging. Mutually exclusive with
+.BR \-\-quiet .
+.TP
+.B \-\-progress
+Show a live within-file progress indicator for large files. If it appears
+together with
+.BR \-q ,
+whichever option appears last on the command line wins, and a warning is
+printed to standard error.
+.TP
+.BR \-f ", " \-\-force
+Re-hash every file unconditionally, ignoring any existing metadata. Cannot be
+combined with
+.BR \-\-dry\-run ", " \-\-import ", or " \-\-verify .
+This option does
+.I not
+override
+.B @sumtag\-ignore
+markers; use
+.B \-\-no\-ignore
+for that.
+.TP
+.BI \-\-database " VALUE"
+Mirror each file's metadata into a database in addition to the extended
+attribute, which remains the source of truth.
+.I VALUE
+is a SQLite file path, or a
+.RI scheme ://
+DSN. A value matching the pattern
+.RB ` ^[a-z][a-z0-9+.\-]*:// '
+is treated as a DSN
+.RB ( mysql:// ", " postgresql:// );
+any other value, including one that merely contains a colon, is a SQLite file
+path. Only SQLite is implemented; a DSN is recognised and rejected as not yet
+supported. Database paths are stored relative to the file's mount point so
+they survive remounting at a different location.
+.TP
+.B \-\-import
+Do not compute any checksum; only copy metadata already present in each file's
+extended attribute into the database. Requires
+.BR \-\-database .
+Files lacking usable metadata are skipped and reported. Useful for populating
+a database from an archive that was hashed on a previous run. Cannot be
+combined with
+.BR \-\-force " or " \-\-verify .
+.TP
+.B \-\-verify
+Read-only integrity check: recompute each file's checksum and compare it to the
+stored value, reporting any disagreement. Nothing is written, even on a
+mismatch. A mismatch while the stored modification time still matches the
+file's mtime indicates silent corruption; a mismatch accompanied by a newer
+mtime indicates an ordinary modification whose stamp is merely stale. Files
+with no usable metadata are reported as unverifiable. Cannot be combined with
+.BR \-\-database ", " \-\-force ", or " \-\-import ;
+combining with
+.B \-\-dry\-run
+is a redundant no-op and is permitted. See
+.B EXIT STATUS
+below.
+.TP
+.B \-\-no\-ignore
+Disregard all
+.B @sumtag\-ignore
+marker files for this run, processing every directory regardless of markers.
+.TP
+.B \-\-version
+Print version information and exit.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.SH IGNORE MARKERS
+A directory containing a file named
+.B @sumtag\-ignore
+is exempted along with its entire subtree: sumtag does not descend into it, and
+nothing beneath it is read, hashed, stamped, or mirrored to a database. The
+marker file itself is never hashed. Only the file's presence matters; its
+contents are ignored and reserved for future use. The exemption applies in
+every mode and takes precedence over
+.BR \-\-force ;
+use
+.B \-\-no\-ignore
+to override it. A marker found at a directory named directly on the command
+line is honoured, with a warning printed to standard error.
+.SH EXIT STATUS
+Without
+.BR \-\-verify ,
+sumtag exits
+.B 0
+on success and non-zero if an error prevented completion.
+.PP
+With
+.BR \-\-verify :
+.TP
+.B 0
+all checked files verified intact.
+.TP
+.B 1
+one or more checksum mismatches (corruption) were found.
+.TP
+.B 2
+unreadable files or other errors prevented a complete check.
+.SH FILES
+.TP
+.B user.sumtag
+Extended attribute holding each file's checksum and metadata as UTF-8 JSON.
+.TP
+.B @sumtag\-ignore
+Marker file that exempts its directory and subtree (see IGNORE MARKERS).
+.SH EXAMPLES
+Scan the current directory:
+.PP
+.EX
+sumtag
+.EE
+.PP
+Scan two archives:
+.PP
+.EX
+sumtag /data /backup
+.EE
+.PP
+Preview without writing anything:
+.PP
+.EX
+sumtag \-n /data
+.EE
+.PP
+Stamp and also mirror into a SQLite database:
+.PP
+.EX
+sumtag \-\-database /var/lib/sumtag.sqlite /data
+.EE
+.PP
+Import existing metadata into a database without re-reading files:
+.PP
+.EX
+sumtag \-\-database /var/lib/sumtag.sqlite \-\-import /data
+.EE
+.PP
+Verify an archive against its stored checksums:
+.PP
+.EX
+sumtag \-\-verify /backup
+.EE
+.SH NOTES
+Timestamps are recorded in UTC with microsecond precision. Mtime comparisons
+truncate both the stored and live values to the same precision, so the
+comparison is symmetric.
+.SH SEE ALSO
+.BR xattr (1),
+.BR getfattr (1),
+.BR setfattr (1),
+.BR cksum (1)
+.SH AUTHOR
+The sumtag authors.
