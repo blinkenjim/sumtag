@@ -80,19 +80,14 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Entry point for both `sumtag` and `python3 -m sumtag`.
 
-    Returns an int exit code (see module constants). This stub only parses and
-    validates arguments; no scanning is performed yet.
+    Returns an int exit code (see module constants and sumtag(1) EXIT STATUS).
     """
     parser = build_parser()
     args = parser.parse_args(argv)
     validate(args, parser)
 
-    # TODO: implement directory traversal, @sumtag-ignore pruning, xattr
-    # read/compare, XXH3 hashing, database mirroring, and --verify.
-    targets = args.directories or ["."]
-    print("sumtag: not yet implemented (stub); would process: "
-          + ", ".join(targets), file=sys.stderr)
-    return EXIT_OK
+    from . import engine
+    return engine.run(args)
 
 
 if __name__ == "__main__":
