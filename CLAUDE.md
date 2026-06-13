@@ -46,6 +46,8 @@ For each file in a directory tree, sumtag:
 
 Hash values live in a nested `digests` object keyed by algorithm name (`{ "xxh3": "<hex>" }`), **not** as top-level keys. Today only `xxh3` is computed, so the map has one entry; the nested shape exists so future versions can support alternate digests (e.g. `md5`) with no format migration.
 
+The `xxh3` value is the **64-bit** XXH3 variant (`xxhash.xxh3_64_hexdigest`), a 16-character lowercase-hex string. (Pinned 2026-06-13. 64-bit is sufficient for per-file corruption detection — intent #1 compares a file to its own prior hash — and keeps the xattr compact; the higher collision odds of 64-bit only bear on cross-corpus dedup, intent #2, which is left to higher-level tooling.)
+
 Rationale — this is the cheapest moment to fix the on-disk shape, since no files have been stamped yet, and the xattr is the source of truth that travels into static archives (expensive to migrate later):
 
 - **Additive, not breaking.** Adding a digest later is `{ "xxh3": "...", "md5": "..." }`. Old readers still find `xxh3`; it does not force a major-version bump or a re-hash of files that don't need the new algorithm.
