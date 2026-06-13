@@ -9,6 +9,7 @@ runs in the same environment the harness runs in.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,14 @@ def run_scenario(
     keep: bool,
 ) -> Outcome:
     tree = Path(tempfile.mkdtemp(prefix=f"sumtag-{scenario.name}-", dir=str(workdir)))
+    # A scenario can refer to a database with the {db} token; it lives beside the
+    # tree (not inside it, so it is never itself scanned). The check derives the
+    # same path as str(root) + ".sqlite".
+    db_path = str(tree) + ".sqlite"
+
+    def _sub(argv: list[str]) -> list[str]:
+        return [a.replace("{db}", db_path) for a in argv]
+
     try:
         from .corpus import build
 
@@ -48,8 +57,14 @@ def run_scenario(
         if scenario.mutate is not None:
             scenario.mutate(tree)
 
+        # Optional pre-runs (e.g. to set up a prior database state) before the
+        # single run whose result is checked.
+        for pre in scenario.extra_runs:
+            subprocess.run([*sumtag_cmd, *_sub(pre), str(tree)],
+                           capture_output=True, text=True, cwd=str(tree))
+
         proc = subprocess.run(
-            [*sumtag_cmd, *scenario.argv, str(tree)],
+            [*sumtag_cmd, *_sub(scenario.argv), str(tree)],
             capture_output=True,
             text=True,
             cwd=str(tree),
@@ -77,6 +92,10 @@ def run_scenario(
             print(f"  (kept tree: {tree})", file=sys.stderr)
         else:
             shutil.rmtree(tree, ignore_errors=True)
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
 
 
 def run_all(

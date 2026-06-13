@@ -49,6 +49,14 @@ class Scenario:
     argv: list[str]
     check: Callable[[Path, RunResult, Checker], None]
     mutate: Callable[[Path], None] | None = None
+    # Extra sumtag invocations run before the checked run (e.g. to seed a prior
+    # database state). The token "{db}" is substituted in argv and extra_runs.
+    extra_runs: list[list[str]] = field(default_factory=list)
+
+
+def _db_for(root: Path) -> str:
+    """The database path the runner created alongside this scenario's tree."""
+    return str(root) + ".sqlite"
 
 
 # --- mutate helpers -------------------------------------------------------
@@ -213,6 +221,98 @@ def catalog() -> list[Scenario]:
         corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
         argv=["-n"],
         check=check_dryrun,
+    ))
+
+    # 9. --database mirrors metadata in addition to the xattr.
+    def check_db_mirror(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        rows = oracle.read_db(_db_for(root))
+        k.expect(s.present, "xattr should still be written (mirror is in addition)")
+        k.expect(len(rows) == 1, f"expected exactly 1 db row, got {len(rows)}")
+        if rows:
+            r = rows[0]
+            k.expect(r.algo == "xxh3", f"expected algo xxh3, got {r.algo!r}")
+            k.expect(r.digest == s.actual_digest, "db digest should match content")
+            k.expect(r.rel_path.endswith("data.bin"),
+                     f"rel_path should end with data.bin, got {r.rel_path!r}")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="database_mirrors_metadata",
+        description="--database writes a row mirroring the xattr.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        argv=["--database", "{db}"],
+        check=check_db_mirror,
+    ))
+
+    # 10. Re-scanning a file UPSERTs its row in place — no duplicate rows.
+    def check_db_upsert(root, res, k):
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1,
+                 f"re-scan should update one row, not duplicate; got {len(rows)}")
+        if rows:
+            k.expect(rows[0].digest == oracle.inspect(root / "data.bin").actual_digest,
+                     "db digest should match content after re-scan")
+
+    scenarios.append(Scenario(
+        name="database_upsert_on_rescan",
+        description="A second --database run updates the existing row in place.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        extra_runs=[["--database", "{db}"]],            # first stamp + mirror
+        argv=["--force", "--database", "{db}"],          # re-hash + re-mirror
+        check=check_db_upsert,
+    ))
+
+    # 11. --import copies existing xattr metadata WITHOUT computing. Prove it by
+    #     prestamping a deliberately wrong digest: it must land in the db verbatim.
+    def check_import(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1, f"expected 1 imported row, got {len(rows)}")
+        if rows:
+            k.expect(rows[0].digest != s.actual_digest,
+                     "import must copy the stored digest, not recompute it")
+            k.expect(rows[0].digest == s.stored_digest,
+                     "db digest should equal the xattr digest verbatim")
+        k.expect(not s.digest_matches_content, "import must not rewrite the xattr")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="import_copies_without_computing",
+        description="--import feeds the db from xattrs without hashing.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("wrong-digest"))]),
+        argv=["--database", "{db}", "--import"],
+        check=check_import,
+    ))
+
+    # 12. --import skips files that have no usable xattr metadata.
+    def check_import_skips(root, res, k):
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 0,
+                 f"files without metadata should not be imported; got {len(rows)} rows")
+
+    scenarios.append(Scenario(
+        name="import_skips_unstamped",
+        description="--import does not import a file that lacks an xattr.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),  # no prestamp
+        argv=["--database", "{db}", "--import"],
+        check=check_import_skips,
+    ))
+
+    # 13. -n composes with --import: previews, writes nothing — not even the db file.
+    def check_import_dryrun(root, res, k):
+        k.expect(not os.path.exists(_db_for(root)),
+                 "--import -n must not create the database")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="import_dry_run_no_writes",
+        description="--database --import -n previews without touching the db.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("valid"))]),
+        argv=["--database", "{db}", "--import", "-n"],
+        check=check_import_dryrun,
     ))
 
     return scenarios
