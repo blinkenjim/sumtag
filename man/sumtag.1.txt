@@ -62,28 +62,49 @@ OPTIONS
 
        -f, --force
               Re-hash every file unconditionally, ignoring any existing
-              metadata. Cannot be combined with --dry-run, --import, or
-              --verify.  This option does not override @sumtag-ignore markers;
-              use --no-ignore for that.
+              metadata. Cannot be combined with --dry-run or --verify.
+              Combined with --import or --locate, overrides their default
+              refusal to compute (see below). This option does not override
+              @sumtag-ignore markers; use --no-ignore for that.
 
        --database VALUE
-              Mirror each file's metadata into a database in addition to the
-              extended attribute, which remains the source of truth.  VALUE is
-              a SQLite file path, or a scheme:// DSN. A value matching the
-              pattern `^[a-z][a-z0-9+.-]*://' is treated as a DSN (mysql://,
+              Name a database to act on.  VALUE is a SQLite file path, or a
+              scheme:// DSN. A value matching the pattern
+              `^[a-z][a-z0-9+.-]*://' is treated as a DSN (mysql://,
               postgresql://); any other value, including one that merely
               contains a colon, is a SQLite file path. Only SQLite is
               implemented; a DSN is recognised and rejected as not yet
               supported. Database paths are stored relative to the file's
               mount point so they survive remounting at a different location.
+              --database takes no action by itself; it requires at least one
+              of --sum, --import, or --locate to say what to do with it.
+
+       --sum  Re-hash each file per the normal mtime-based decision (see
+              RE-HASHING ) and mirror the result, in addition to the extended
+              attribute, into the database named by --database, which this
+              option requires.
 
        --import
-              Do not compute any checksum; only copy metadata already present
-              in each file's extended attribute into the database. Requires
-              --database.  Files lacking usable metadata are skipped and
-              reported. Useful for populating a database from an archive that
-              was hashed on a previous run. Cannot be combined with --force or
-              --verify.
+              Do not compute any checksum by default; only copy metadata
+              already present in each file's extended attribute into the
+              database. Requires --database.  Files lacking usable metadata
+              are skipped and reported. Useful for populating a database from
+              an archive that was hashed on a previous run. Combined with
+              --force, computes and mirrors every file instead of only
+              propagating what already exists. Combined with --sum, is
+              redundant (the normal decision already computes and mirrors) but
+              not an error. Cannot be combined with --verify.
+
+       --locate
+              Stat every file visited and write filesystem metadata (size,
+              permissions, ownership, link count, device, and timestamps) to
+              the database, regardless of whether xattr work was done. Implies
+              --import: existing extended-attribute metadata is propagated as
+              well, so --locate alone does everything --import alone would,
+              plus stat columns. Requires --database.  Combined with --force,
+              computes checksums for every file too, the same override
+              --import accepts. Useful as a periodic filesystem inventory pass
+              (analogous to updatedb).
 
        --verify
               Read-only integrity check: recompute each file's checksum and
@@ -93,9 +114,10 @@ OPTIONS
               indicates silent corruption; a mismatch accompanied by a newer
               mtime indicates an ordinary modification whose stamp is merely
               stale. Files with no usable metadata are reported as
-              unverifiable. Cannot be combined with --database, --force, or
-              --import; combining with --dry-run is a redundant no-op and is
-              permitted. See EXIT STATUS below.
+              unverifiable. Cannot be combined with --database (nor --sum,
+              --import, or --locate, which all require it), or --force;
+              combining with --dry-run is a redundant no-op and is permitted.
+              See EXIT STATUS below.
 
        --no-ignore
               Disregard all @sumtag-ignore marker files for this run,
@@ -154,11 +176,16 @@ EXAMPLES
 
        Stamp and also mirror into a SQLite database:
 
-       sumtag --database /var/lib/sumtag.sqlite /data
+       sumtag --database /var/lib/sumtag.sqlite --sum /data
 
        Import existing metadata into a database without re-reading files:
 
        sumtag --database /var/lib/sumtag.sqlite --import /data
+
+       Take a filesystem inventory pass, capturing stat metadata alongside any
+       existing checksums:
+
+       sumtag --database /var/lib/sumtag.sqlite --locate /data
 
        Verify an archive against its stored checksums:
 

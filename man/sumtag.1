@@ -76,8 +76,10 @@ printed to standard error.
 .BR \-f ", " \-\-force
 Re-hash every file unconditionally, ignoring any existing metadata. Cannot be
 combined with
-.BR \-\-dry\-run ", " \-\-import ", or " \-\-verify .
-This option does
+.BR \-\-dry\-run " or " \-\-verify .
+Combined with
+.BR \-\-import " or " \-\-locate ,
+overrides their default refusal to compute (see below). This option does
 .I not
 override
 .B @sumtag\-ignore
@@ -86,8 +88,7 @@ markers; use
 for that.
 .TP
 .BI \-\-database " VALUE"
-Mirror each file's metadata into a database in addition to the extended
-attribute, which remains the source of truth.
+Name a database to act on.
 .I VALUE
 is a SQLite file path, or a
 .RI scheme ://
@@ -99,15 +100,50 @@ any other value, including one that merely contains a colon, is a SQLite file
 path. Only SQLite is implemented; a DSN is recognised and rejected as not yet
 supported. Database paths are stored relative to the file's mount point so
 they survive remounting at a different location.
+.B \-\-database
+takes no action by itself; it requires at least one of
+.BR \-\-sum ", " \-\-import ", or " \-\-locate
+to say what to do with it.
+.TP
+.B \-\-sum
+Re-hash each file per the normal mtime-based decision (see
+.B RE\-HASHING )
+and mirror the result, in addition to the extended attribute, into the
+database named by
+.BR \-\-database ,
+which this option requires.
 .TP
 .B \-\-import
-Do not compute any checksum; only copy metadata already present in each file's
-extended attribute into the database. Requires
+Do not compute any checksum by default; only copy metadata already present in
+each file's extended attribute into the database. Requires
 .BR \-\-database .
 Files lacking usable metadata are skipped and reported. Useful for populating
-a database from an archive that was hashed on a previous run. Cannot be
-combined with
-.BR \-\-force " or " \-\-verify .
+a database from an archive that was hashed on a previous run. Combined with
+.BR \-\-force ,
+computes and mirrors every file instead of only propagating what already
+exists. Combined with
+.BR \-\-sum ,
+is redundant (the normal decision already computes and mirrors) but not an
+error. Cannot be combined with
+.BR \-\-verify .
+.TP
+.B \-\-locate
+Stat every file visited and write filesystem metadata (size, permissions,
+ownership, link count, device, and timestamps) to the database, regardless of
+whether xattr work was done. Implies
+.BR \-\-import :
+existing extended-attribute metadata is propagated as well, so
+.B \-\-locate
+alone does everything
+.B \-\-import
+alone would, plus stat columns. Requires
+.BR \-\-database .
+Combined with
+.BR \-\-force ,
+computes checksums for every file too, the same override
+.B \-\-import
+accepts. Useful as a periodic filesystem inventory pass (analogous to
+.BR updatedb ).
 .TP
 .B \-\-verify
 Read-only integrity check: recompute each file's checksum and compare it to the
@@ -116,7 +152,7 @@ mismatch. A mismatch while the stored modification time still matches the
 file's mtime indicates silent corruption; a mismatch accompanied by a newer
 mtime indicates an ordinary modification whose stamp is merely stale. Files
 with no usable metadata are reported as unverifiable. Cannot be combined with
-.BR \-\-database ", " \-\-force ", or " \-\-import ;
+.BR \-\-database " (nor " \-\-sum ", " \-\-import ", or " \-\-locate ", which all require it), or " \-\-force ";"
 combining with
 .B \-\-dry\-run
 is a redundant no-op and is permitted. See
@@ -193,13 +229,20 @@ sumtag \-n /data
 Stamp and also mirror into a SQLite database:
 .PP
 .EX
-sumtag \-\-database /var/lib/sumtag.sqlite /data
+sumtag \-\-database /var/lib/sumtag.sqlite \-\-sum /data
 .EE
 .PP
 Import existing metadata into a database without re-reading files:
 .PP
 .EX
 sumtag \-\-database /var/lib/sumtag.sqlite \-\-import /data
+.EE
+.PP
+Take a filesystem inventory pass, capturing stat metadata alongside any
+existing checksums:
+.PP
+.EX
+sumtag \-\-database /var/lib/sumtag.sqlite \-\-locate /data
 .EE
 .PP
 Verify an archive against its stored checksums:

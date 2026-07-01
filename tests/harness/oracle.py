@@ -91,12 +91,22 @@ class DbRow:
 
     mountpoint: str
     rel_path: str
+    inode: int
     algo: str
     digest: str
     file_mtime: str
     hashed_at: str
     run_started_at: str
     version: str
+    size: int | None
+    mode: int | None
+    uid: int | None
+    gid: int | None
+    nlink: int | None
+    dev: int | None
+    ctime: str | None
+    atime: str | None
+    birthtime: str | None
 
 
 def read_db(db_path) -> list[DbRow]:
@@ -115,8 +125,10 @@ def read_db(db_path) -> list[DbRow]:
         try:
             cur = conn.execute(
                 """
-                SELECT m.path, f.rel_path, f.algo, f.digest,
-                       f.file_mtime, f.hashed_at, f.run_started_at, f.version
+                SELECT m.path, f.rel_path, f.inode, f.algo, f.digest,
+                       f.file_mtime, f.hashed_at, f.run_started_at, f.version,
+                       f.size, f.mode, f.uid, f.gid, f.nlink, f.dev,
+                       f.ctime, f.atime, f.birthtime
                   FROM files f
                   JOIN mountpoints m ON m.id = f.mountpoint_id
                  ORDER BY m.path, f.rel_path, f.algo

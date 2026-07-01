@@ -85,7 +85,15 @@ A directory can be exempted from sumtag by placing a marker file named **`@sumta
 
 ## Database storage
 
-By default, sumtag stores metadata only in the per-file xattr. The optional `--database` flag adds a database as a second sink: each file's metadata is mirrored into the database **in addition to** (not instead of) the xattr. The xattr remains the source of truth that travels with the file; the database is a detached, queryable mirror.
+By default, sumtag stores metadata only in the per-file xattr. The optional `--database` flag names a database as a second sink; metadata is mirrored into it **in addition to** (not instead of) the xattr. The xattr remains the source of truth that travels with the file; the database is a detached, queryable mirror.
+
+`--database` only names *where*; it takes no action by itself. *What* happens to that database is chosen by one or more of three parallel, combinable action flags:
+
+- **`--sum`** — (re-)hash per the normal mtime-based decision (CLAUDE.md "Re-hashing logic") and mirror the result.
+- **`--import`** — never compute; only propagate metadata already present in a file's xattr (see `--import` mode below).
+- **`--locate`** — stat every file and write the `os.stat()` metadata to the database; implies `--import` (see below).
+
+Each of `--sum`, `--import`, `--locate` **requires `--database`** (nothing to act on otherwise), and `--database` **requires at least one of them** (otherwise there is no action to take — an error, not a silent no-op). They may be combined freely: e.g. `--sum --locate` computes/mirrors and captures stat columns in the same pass. `--sum` and `--import` together is redundant (`--sum` already computes and mirrors, so `--import`'s refusal to compute has nothing left to refuse) but is not an error.
 
 For now the database must be **SQLite**. The storage layer should be written so that other backends could be added later, but no other backend is supported yet.
 
@@ -123,12 +131,23 @@ CREATE TABLE mountpoints (
 CREATE TABLE files (
   mountpoint_id  INTEGER NOT NULL REFERENCES mountpoints(id),
   rel_path       TEXT NOT NULL,
-  algo           TEXT NOT NULL,      -- digest algorithm, e.g. 'xxh3'
+  inode          INTEGER NOT NULL,   -- filesystem inode number at stamp time
+  algo           TEXT NOT NULL,      -- digest algorithm, e.g. 'md5'
   digest         TEXT NOT NULL,      -- the hash value
   file_mtime     TEXT NOT NULL,
   hashed_at      TEXT NOT NULL,
   run_started_at TEXT NOT NULL,
   version        TEXT NOT NULL,
+  -- locate columns (os.stat metadata); NULL until a --locate run populates them
+  size           INTEGER,            -- st_size: file size in bytes
+  mode           INTEGER,            -- st_mode: permission and type bits
+  uid            INTEGER,            -- st_uid: owner user ID
+  gid            INTEGER,            -- st_gid: owner group ID
+  nlink          INTEGER,            -- st_nlink: hard-link count
+  dev            INTEGER,            -- st_dev: device number
+  ctime          TEXT,               -- st_ctime: metadata-change time, ISO 8601 UTC
+  atime          TEXT,               -- st_atime: last-access time, ISO 8601 UTC
+  birthtime      TEXT,               -- st_birthtime: creation time (macOS only)
   UNIQUE (mountpoint_id, rel_path)   -- identity: one row per file location
 );
 
@@ -137,8 +156,10 @@ CREATE INDEX idx_digest ON files(digest);
 
 - The **mountpoints** table normalizes the mount point, which repeats across many files; rows in `files` reference it by integer id rather than storing the full path over and over.
 - A file's **identity** is its location, `(mountpoint_id, rel_path)` — a given path on a given filesystem is exactly one file. This is the UPSERT target: re-scanning a file updates its row in place (`INSERT ... ON CONFLICT DO UPDATE`).
-- The digest column is **generically named** (`algo` + `digest`, not `xxh3`) so the same schema holds whatever algorithm the xattr carries — the future-digest decision recorded under the xattr schema, applied to the mirror. Dedup queries group by `(algo, digest)`.
+- The digest column is **generically named** (`algo` + `digest`, not `md5`) so the same schema holds whatever algorithm the xattr carries — the future-digest decision recorded under the xattr schema, applied to the mirror. Dedup queries group by `(algo, digest)`.
 - `digest` is an **index, not a unique key**. Duplicate detection depends on multiple files sharing a hash, so the hash *must* be allowed to repeat. The index makes grouping/sorting by hash fast (`SELECT algo, digest, COUNT(*) FROM files GROUP BY algo, digest HAVING COUNT(*) > 1`).
+- `inode` records the filesystem inode number at stamp time. Its primary use is a safety check before any dedup deletion: two files with the same digest but different inodes are distinct copies; two with the same inode are hard links to the same data — deleting one would not free space and could appear to delete the "only" copy. The inode is not indexed; dedup candidates are first narrowed by digest, then the inode check eliminates hard-link false positives.
+- The **locate columns** (`size`, `mode`, `uid`, `gid`, `nlink`, `dev`, `ctime`, `atime`, `birthtime`) mirror `os.stat()` output. They are nullable: a row written without `--locate` has them NULL until a future `--locate` run fills them in; a stat-less update uses `COALESCE` in the UPSERT so it never clobbers data already written. `file_mtime` and `inode` are already in the primary columns and are not duplicated here. `birthtime` is macOS-only; it is NULL on Linux and other platforms.
 - Both tables rely on SQLite's implicit `rowid` as their physical key; no primary key on `files` is needed beyond the `UNIQUE` constraint and the `digest` index.
 - One row holds one digest per file location. If a future version stores **multiple** digests per file simultaneously, this moves to a child `digests` table keyed by file. That migration is deferred and acceptably cheap: the database is a rebuildable mirror of the xattrs, unlike the xattr format itself.
 
@@ -151,6 +172,10 @@ Out of scope (future, higher-level tooling): the database accumulates rows for f
 Reading metadata, computing a checksum, and writing it are separable steps. The `--import` flag means **never read file contents or compute a checksum**; only propagate metadata that already exists in a file's xattr into the database. Files lacking a usable xattr are skipped and reported.
 
 `--import` **requires `--database`** — its sole job is to feed the database from existing xattrs, so it is meaningless without a database to feed (error if given alone). It traverses the tree and imports existing xattr metadata without re-reading file contents — e.g. populating a database from an archive that was already hashed on a previous run. (The name is purpose-first: the older mechanism-named `--no-hash` was retired in favor of `--import`.)
+
+`--import`'s refusal to compute is the default, not an absolute rule: combined with `--force` (see Flags), it re-hashes every file and mirrors the result, rather than only propagating what already exists. Combined with `--sum`, the normal mtime-based decision drives computation instead (`--sum`'s presence makes `--import` a no-op, since there is nothing left for it to refuse).
+
+`--locate` **implies** `--import`: a `--locate` run propagates existing xattr metadata exactly as `--import` would, in addition to capturing stat columns — so `--locate` alone does everything `--import` alone would, plus more. Passing both explicitly is redundant but not an error.
 
 `--import` is distinct from `--dry-run` (`-n`). `-n` means *no side effects anywhere* — no xattr writes and no database writes; it only reports. The two compose: `--database db.sqlite --import -n` previews what would be imported without touching the database.
 
@@ -183,7 +208,7 @@ Without the mtime gate, every normally-edited file would read as a mismatch; wit
 | `1` | one or more mismatches (corruption) found |
 | `2` | unreadable files or other errors prevented a complete check |
 
-**Conflicts:** `--verify` + `--database` is an error — on a mismatch there is no non-arbitrary answer to *which* digest to store (the trusted stored one, or the freshly computed one under suspicion); the ambiguity is the proof they should not combine. `--verify` + `--force` is an error (force writes; verify must not). `--verify` + `--import` is an error (import refuses to compute; verify must compute). `--verify` + `-n` is a redundant no-op (verify is already side-effect-free) and is allowed.
+**Conflicts:** `--verify` + `--database` (and so also `--sum`, `--import`, `--locate`, which all require `--database`) is an error — on a mismatch there is no non-arbitrary answer to *which* digest to store (the trusted stored one, or the freshly computed one under suspicion); the ambiguity is the proof they should not combine, and all three actions write to the database. `--verify` + `--force` is an error (force writes; verify must not). `--verify` + `-n` is a redundant no-op (verify is already side-effect-free) and is allowed.
 
 ## Future work (designed-for, not built)
 
@@ -275,15 +300,33 @@ With no directory arguments, cwd is processed. Explicit paths override that defa
 | `--dry-run` | `-n` | bool | Scan and report what would be done; do not write any xattrs. Output is identical to a real run. |
 | `--quiet` | `-q` | count | `-q`: suppress normal output. `-qq`: also suppress errors (to stderr). |
 | `--verbose` | `-v` | count | `-v`: show reason for each decision (including skips). `-vv`: deep internals for debugging. |
-| `--progress` | | bool | Show a live within-file progress indicator for large files. User-friendly; distinct from verbose output. |
+| `--progress` | | bool | Show a live within-file progress indicator, triggered once a single file's checksum has run for more than 5 seconds. User-friendly; distinct from verbose output. |
 | `--force` | `-f` | bool | Re-hash every file unconditionally, ignoring any existing xattr metadata. |
-| `--database` | | str | Mirror metadata into a database in addition to the xattr. Value is a SQLite file path, or a `scheme://` DSN (`mysql://…`, `postgresql://…`) — only SQLite is implemented; DSNs are reserved for future backends. |
+| `--database` | | str | Names the database to act on (SQLite path, or a `scheme://` DSN — only SQLite is implemented; DSNs are reserved for future backends). Takes no action by itself; requires at least one of `--sum`, `--import`, `--locate`. |
+| `--sum` | | bool | (Re-)hash per the normal mtime-based decision and mirror the result into `--database`. Requires `--database`. |
 | `--import` | | bool | Never compute checksums; only copy metadata already present in xattrs into the database. Requires `--database`. |
 | `--verify` | | bool | Read-only: recompute each file's checksum and compare it to the stored digest, reporting mismatches (corruption). Writes nothing. Exit `0`/`1`/`2` = intact/corruption/errors. |
 | `--no-ignore` | | bool | Disregard all `@sumtag-ignore` marker files for this run, processing every directory regardless of markers. |
+| `--locate` | | bool | Stat every file visited and write the `os.stat()` metadata to the database, regardless of whether xattr work was done; implies `--import`. Requires `--database`. Useful as a periodic filesystem inventory pass (analogous to `updatedb`). |
 
-`-q` and `-v` together are an error. `--force` and `--dry-run` together are an error. `--force` and `--import` together are an error (force demands re-hashing everything; `--import` forbids computing). `--import` requires `--database` (it has nothing to feed otherwise). `--verify` conflicts with `--database`, `--force`, and `--import` (see Verification); `--verify -n` is a redundant no-op and is allowed. `--progress` and `-q` conflict: whichever appears later on the command line wins, with a warning to stderr. `--force` does **not** override `@sumtag-ignore` markers (see Ignore markers); use `--no-ignore` to process exempted directories.
+`-q` and `-v` together are an error. `--force` and `--dry-run` together are an error. `--sum`, `--import`, and `--locate` are parallel, combinable actions performed on `--database` (see Database storage); each requires `--database`, and `--database` requires at least one of them. `--force` and `--import` together are **allowed**: `--import`'s refusal to compute is a default, not a hard restriction, and `--force` is the flag whose whole job is overriding defaults about what gets (re-)computed — so `--force --import` re-hashes every file and mirrors the result. The same override applies to `--force --locate`, since `--locate` implies `--import`. `--verify` conflicts with `--database` (and so `--sum`, `--import`, `--locate`) and `--force` (see Verification); `--verify -n` is a redundant no-op and is allowed. `--progress` and `-q` conflict: whichever appears later on the command line wins, with a warning to stderr. `--force` does **not** override `@sumtag-ignore` markers (see Ignore markers); use `--no-ignore` to process exempted directories.
+
+### Status lines
+
+Sumtag's default (non-quiet) output is an *announcement*, not a completion report: for any file about to be checksummed, the line prints **before** the read begins — `hash <path> (<reason>)` for a stamp, `verify <path>` for `--verify` — using present/imperative verbs, not past tense (`hash`/`import`, not `hashed`/`imported`). This is what makes `--progress` legible: the path is already on screen by the time a slow file's live bar appears at the 5-second mark, rather than the bar being the first anyone hears of that file.
+
+A clean outcome earns no further line — silence means nothing bad happened. `--verify`'s successful case in particular prints nothing beyond its `verify <path>` announcement (no `ok` line); the announcement already was the record. Only a *deviation* from clean earns a second line: `CORRUPT <path>` (mismatch), `stale <path> (modified since hash; restamp needed)` (legitimately edited, not corrupt — surfaced unconditionally, like `rsync` noting a file changed mid-transfer), or an error via the normal error channel (`sumtag: <path>: <error>`; the file is skipped and the run continues). `unverifiable <path>` replaces the announcement outright when there's no usable xattr to check against, since no read is even attempted.
+
+`skip <path> (<reason>)` — a file already up-to-date, nothing done — stays gated behind `-v`: a repeat run over an already-stamped archive stays quiet by default, with `-v` available for the full per-file accounting.
+
+### `--progress` indicator
+
+`--progress` is triggered by *time*, not file size: a modest file on a slow network mount is just as worth watching as a huge one on fast local storage, and a huge file that happens to finish quickly needs no indicator at all. Concretely: once a single file's checksum has been computing for more than 5 seconds, a live line appears on stderr — redrawn in place (`\r`, throttled to a few updates per second), showing bytes read against the file's total size — and is cleared the moment that file's hash completes. A file that finishes under the threshold shows nothing at all.
+
+This is deliberately independent of `-v`/`--verbose`: verbosity is a durable, appended log of *why* each file got the decision it did (fine to redirect into a file), while `--progress` is an ephemeral, redrawn-in-place indicator of *how far through* the current file the run is (meaningless once redirected). Composing them is normal — with both given, the per-file announcement (`hash <path> (reason)` or `verify <path>`) prints first; then, if that file turns out to be slow, the live bar appears and redraws in place until the hash completes.
+
+`--progress` is suppressed outright when stderr is not a terminal (a redirected log or pipe), since carriage-return redraws would just corrupt it rather than show anything useful.
 
 `-q` and `-v` use `action='count'` in argparse, so `-vv` and `-v -v` are equivalent.
 
-Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--import`, `--verify`, `--no-ignore`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.
+Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--locate`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.

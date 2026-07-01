@@ -26,10 +26,6 @@ CURRENT_VERSION = "0.1.0"
 
 
 # --- digest algorithm -----------------------------------------------------
-#
-# sumtag uses XXH3 in its **64-bit** variant (settled 2026-06-13; see CLAUDE.md).
-# This is the single place that choice lives for the whole harness; a 64-bit
-# digest is 16 lowercase-hex characters.
 
 #: Algorithm key as it appears in the xattr ``digests`` map and the DB ``algo``
 #: column.

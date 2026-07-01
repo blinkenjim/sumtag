@@ -11,8 +11,6 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-import xxhash
-
 from . import __version__
 
 #: Extended-attribute name. The same literal string on Linux and macOS.
@@ -22,13 +20,7 @@ XATTR_NAME = "user.sumtag"
 VERSION = __version__
 
 #: Digest algorithm key in the ``digests`` map and the DB ``algo`` column.
-#: XXH3 in its 64-bit variant (16-char lowercase hex); see CLAUDE.md.
 ALGO = "xxh3"
-
-
-def compute_digest(data: bytes) -> str:
-    """Return the lowercase-hex XXH3-64 digest of ``data``."""
-    return xxhash.xxh3_64_hexdigest(data)
 
 
 def major_of(version: str) -> int:

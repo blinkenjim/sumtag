@@ -40,16 +40,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-f", "--force", action="store_true",
                         help="re-hash every file, ignoring existing metadata")
     parser.add_argument("--database", metavar="VALUE",
-                        help="mirror metadata into a database (SQLite path or "
-                             "scheme:// DSN; only SQLite is implemented)")
+                        help="the database to act on (SQLite path or scheme:// "
+                             "DSN; only SQLite is implemented). Requires at least "
+                             "one of --sum, --import, --locate")
+    parser.add_argument("--sum", action="store_true",
+                        help="compute/re-hash per the normal mtime-based decision "
+                             "and mirror the result into --database")
     parser.add_argument("--import", dest="do_import", action="store_true",
                         help="copy existing xattr metadata into the database "
-                             "without computing; requires --database")
+                             "without computing (unless --force overrides); "
+                             "requires --database")
     parser.add_argument("--verify", action="store_true",
                         help="recompute and compare against stored checksums "
                              "(read-only); writes nothing")
     parser.add_argument("--no-ignore", action="store_true",
                         help="disregard @sumtag-ignore marker files")
+    parser.add_argument("--locate", action="store_true",
+                        help="stat every file and write filesystem metadata to the "
+                             "database, implying --import (propagates existing "
+                             "metadata too); requires --database")
     parser.add_argument("--version", action="version",
                         version=f"%(prog)s {__version__}")
     return parser
@@ -61,20 +70,54 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         parser.error("-q/--quiet and -v/--verbose are mutually exclusive")
     if args.force and args.dry_run:
         parser.error("--force and --dry-run are mutually exclusive")
-    if args.force and args.do_import:
-        parser.error("--force and --import are mutually exclusive")
+    if args.sum and not args.database:
+        parser.error("--sum requires --database")
     if args.do_import and not args.database:
         parser.error("--import requires --database")
+    if args.locate and not args.database:
+        parser.error("--locate requires --database")
+    if args.database and not (args.sum or args.do_import or args.locate):
+        parser.error("--database requires at least one of --sum, --import, --locate")
     if args.verify:
         if args.database:
             parser.error("--verify cannot be combined with --database")
+        if args.sum:
+            parser.error("--verify cannot be combined with --sum")
         if args.force:
             parser.error("--verify cannot be combined with --force")
         if args.do_import:
             parser.error("--verify cannot be combined with --import")
-    # --progress vs -q: the later one on the command line wins, with a warning.
-    # argparse does not preserve option order, so that is resolved at run time
-    # (TODO) rather than here.
+        if args.locate:
+            parser.error("--verify cannot be combined with --locate")
+    # --progress vs -q is resolved by command-line order, not rejected here --
+    # see _resolve_progress_quiet, which needs the raw argv argparse discards.
+
+
+def _resolve_progress_quiet(raw: list[str], args: argparse.Namespace) -> None:
+    """Resolve --progress vs -q by command-line order (CLAUDE.md "Flags").
+
+    Only matters when both are actually in effect. Whichever appears later
+    wins outright -- the loser's flag is discarded, not just the narrow
+    overlap between them -- and a warning is printed to stderr either way.
+    """
+    if not (args.progress and args.quiet):
+        return
+    last_progress = last_quiet = -1
+    for i, tok in enumerate(raw):
+        if tok == "--progress":
+            last_progress = i
+        elif tok in ("-q", "--quiet"):
+            last_quiet = i
+        elif tok.startswith("-") and not tok.startswith("--") and "q" in tok[1:]:
+            last_quiet = i  # a bundled short cluster, e.g. -fq or -qq
+    if last_progress > last_quiet:
+        print("sumtag: --progress overrides -q (appears later on the command line)",
+              file=sys.stderr)
+        args.quiet = 0
+    else:
+        print("sumtag: -q overrides --progress (appears later on the command line)",
+              file=sys.stderr)
+        args.progress = False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,9 +125,11 @@ def main(argv: list[str] | None = None) -> int:
 
     Returns an int exit code (see module constants and sumtag(1) EXIT STATUS).
     """
+    raw = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
     validate(args, parser)
+    _resolve_progress_quiet(raw, args)
 
     from . import engine
     return engine.run(args)

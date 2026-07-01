@@ -241,7 +241,7 @@ def catalog() -> list[Scenario]:
         name="database_mirrors_metadata",
         description="--database writes a row mirroring the xattr.",
         corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
-        argv=["--database", "{db}"],
+        argv=["--database", "{db}", "--sum"],
         check=check_db_mirror,
     ))
 
@@ -258,8 +258,8 @@ def catalog() -> list[Scenario]:
         name="database_upsert_on_rescan",
         description="A second --database run updates the existing row in place.",
         corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
-        extra_runs=[["--database", "{db}"]],            # first stamp + mirror
-        argv=["--force", "--database", "{db}"],          # re-hash + re-mirror
+        extra_runs=[["--database", "{db}", "--sum"]],            # first stamp + mirror
+        argv=["--force", "--database", "{db}", "--sum"],          # re-hash + re-mirror
         check=check_db_upsert,
     ))
 
@@ -313,6 +313,93 @@ def catalog() -> list[Scenario]:
                                       prestamp=PreStamp("valid"))]),
         argv=["--database", "{db}", "--import", "-n"],
         check=check_import_dryrun,
+    ))
+
+    # 14. --sum without --locate leaves the locate/stat columns NULL.
+    def check_sum_no_stat(root, res, k):
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1, f"expected 1 row, got {len(rows)}")
+        if rows:
+            k.expect(rows[0].size is None,
+                     "stat columns must stay NULL without --locate")
+
+    scenarios.append(Scenario(
+        name="sum_without_locate_leaves_stat_null",
+        description="--sum alone does not populate the locate/stat columns.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        argv=["--database", "{db}", "--sum"],
+        check=check_sum_no_stat,
+    ))
+
+    # 15. --locate captures stat columns (size here, as the easy-to-verify one).
+    def check_locate_stat(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1, f"expected 1 row, got {len(rows)}")
+        if rows:
+            actual_size = (root / "data.bin").stat().st_size
+            k.expect(rows[0].size == actual_size,
+                     f"expected size {actual_size}, got {rows[0].size!r}")
+            k.expect(rows[0].digest == s.actual_digest,
+                     "--sum --locate together should still compute correctly")
+
+    scenarios.append(Scenario(
+        name="locate_captures_stat_columns",
+        description="--locate stats every file and writes size/mode/etc. to the db.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        argv=["--database", "{db}", "--sum", "--locate"],
+        check=check_locate_stat,
+    ))
+
+    # 16. --locate implies --import: without --sum or --force, it must not
+    #     compute -- prove it the same way as import_copies_without_computing,
+    #     with a deliberately wrong prestamped digest that must survive verbatim
+    #     -- while still capturing stat columns.
+    def check_locate_implies_import(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1, f"expected 1 row, got {len(rows)}")
+        if rows:
+            k.expect(rows[0].digest != s.actual_digest,
+                     "--locate must not compute; the wrong stored digest should survive")
+            k.expect(rows[0].digest == s.stored_digest,
+                     "db digest should equal the xattr digest verbatim")
+            actual_size = (root / "data.bin").stat().st_size
+            k.expect(rows[0].size == actual_size,
+                     f"expected size {actual_size}, got {rows[0].size!r}")
+        k.expect(not s.digest_matches_content, "--locate must not rewrite the xattr")
+
+    scenarios.append(Scenario(
+        name="locate_without_sum_imports_and_stats",
+        description="--locate alone propagates existing metadata and stats, without computing.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("wrong-digest"))]),
+        argv=["--database", "{db}", "--locate"],
+        check=check_locate_implies_import,
+    ))
+
+    # 17. A row written by a plain --sum run (stat columns NULL) gets its stat
+    #     columns filled by a later --locate-only run, without disturbing the
+    #     digest already mirrored -- the COALESCE-on-stat-less-update contract.
+    def check_locate_fills_existing_row(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1,
+                 f"--locate re-scan should update the row in place, got {len(rows)}")
+        if rows:
+            k.expect(rows[0].digest == s.actual_digest,
+                     "digest from the earlier --sum run must survive untouched")
+            actual_size = (root / "data.bin").stat().st_size
+            k.expect(rows[0].size == actual_size,
+                     f"expected size {actual_size}, got {rows[0].size!r}")
+
+    scenarios.append(Scenario(
+        name="locate_fills_stat_on_existing_row",
+        description="--locate backfills stat columns on a row an earlier --sum run created.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        extra_runs=[["--database", "{db}", "--sum"]],   # row exists, stat columns NULL
+        argv=["--database", "{db}", "--locate"],         # backfill stat, keep the digest
+        check=check_locate_fills_existing_row,
     ))
 
     return scenarios
