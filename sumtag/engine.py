@@ -25,9 +25,19 @@ class _Reporter:
         self._quiet = args.quiet
         self._verbose = args.verbose
 
-    def info(self, msg: str) -> None:        # normal output
+    def info(self, msg: str) -> None:        # normal output, unconditional label
         if self._quiet == 0:
             print(msg)
+
+    def announce(self, path: str, verbose_msg: str) -> None:
+        """A routine per-file announcement (CLAUDE.md "Status lines").
+
+        Bare path without -v; the full action/reason form with -v. Unlike
+        info(), the caller's message is only shown at -v -- by default this
+        prints nothing but the path.
+        """
+        if self._quiet == 0:
+            print(verbose_msg if self._verbose >= 1 else path)
 
     def detail(self, msg: str) -> None:      # only with -v
         if self._verbose >= 1 and self._quiet == 0:
@@ -74,6 +84,9 @@ def run(args) -> int:
 
     if args.verify:
         return _verify(roots, args, rep)
+
+    if args.remove:
+        return _remove(roots, args, rep)
 
     # A database is opened only when there is something to write to it: never
     # under -n, so --dry-run has no side effect at all (not even creating the
@@ -137,10 +150,10 @@ def _stamp(roots, args, rep: _Reporter, store) -> int:
 
             if rehash:
                 if args.dry_run:
-                    rep.info(f"would hash {path} ({reason})")
+                    rep.announce(path, f"would hash {path} ({reason})")
                 else:
-                    rep.info(f"hash {path} ({reason})")
-                    ind = progress_mod.make(path, st.st_size, args.progress)
+                    rep.announce(path, f"hash {path} ({reason})")
+                    ind = progress_mod.make(st.st_size, args.progress, args.si)
                     digest = hashing.hash_file(path, progress=ind)
                     if ind is not None:
                         ind.finish()
@@ -150,9 +163,9 @@ def _stamp(roots, args, rep: _Reporter, store) -> int:
                 if use_standard_decision:
                     rep.detail(f"skip   {path} ({reason})")
                 else:
-                    rep.info(f"import {path}")
+                    rep.announce(path, f"import {path}")
             else:
-                rep.info(f"skip (no metadata) {path}")
+                rep.announce(path, f"skip (no metadata) {path}")
 
             # Mirror in addition to the xattr: re-hashed and pre-existing
             # metadata both get mirrored, so the database reflects the whole
@@ -190,10 +203,10 @@ def _verify(roots, args, rep: _Reporter) -> int:
                 any_error = True  # the check could not be completed for this file
                 continue
 
-            rep.info(f"verify {path}")
+            rep.announce(path, f"verify {path}")
             computed = {}
             for algo in meta["digests"]:
-                ind = progress_mod.make(path, st.st_size, args.progress)
+                ind = progress_mod.make(st.st_size, args.progress, args.si)
                 computed[algo] = hashing.hash_file(path, progress=ind)
                 if ind is not None:
                     ind.finish()
@@ -214,3 +227,32 @@ def _verify(roots, args, rep: _Reporter) -> int:
     if any_error:
         return EXIT_ERRORS
     return EXIT_OK
+
+
+def _remove(roots, args, rep: _Reporter) -> int:
+    """Strip the user.sumtag xattr from every file in the tree (--remove).
+
+    A testing/reset utility, not a data-integrity primitive: there is no
+    mtime gating or hashing, just an unconditional delete of whatever
+    attribute happens to be present. Composes with --dry-run to preview
+    which files carry a stamp without touching anything.
+    """
+    exit_code = EXIT_OK
+
+    for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
+                                on_warn=rep.error):
+        try:
+            if args.dry_run:
+                if xattr.get(path, schema.XATTR_NAME) is None:
+                    rep.detail(f"skip {path} (no metadata)")
+                else:
+                    rep.announce(path, f"would remove {path}")
+            elif xattr.remove(path, schema.XATTR_NAME):
+                rep.announce(path, f"remove {path}")
+            else:
+                rep.detail(f"skip {path} (no metadata)")
+        except OSError as e:
+            exit_code = EXIT_ERRORS
+            rep.error(f"sumtag: {path}: {e}")
+
+    return exit_code

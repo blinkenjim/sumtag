@@ -50,15 +50,25 @@ OPTIONS
               messages on standard error. Mutually exclusive with --verbose.
 
        -v, --verbose
-              Explain the decision made for each file, including skips. Repeat
-              (-vv) for deep internal detail intended for debugging. Mutually
-              exclusive with --quiet.
+              Explain the decision made for each file, including skips.
+              Without this option, each file touched is announced by its bare
+              path alone. Repeat (-vv) for deep internal detail intended for
+              debugging. Mutually exclusive with --quiet.
 
        --progress
               Show a live within-file progress indicator for large files. If
               it appears together with -q, whichever option appears last on
               the command line wins, and a warning is printed to standard
-              error.
+              error. The indicator's line shows the file's size, the current
+              hashing rate, a bar, the percentage complete, elapsed time, and
+              an ETA, e.g.:
+
+              99.3GiB   40.1MiB/s  [===============>     ]  84%   0:05:12  ETA 58s
+
+       --si
+              Display --progress sizes and rates using decimal (SI,
+              powers-of-1000: kB/MB/GB) units instead of the default binary
+              (powers-of-1024: KiB/MiB/GiB) units.
 
        -f, --force
               Re-hash every file unconditionally, ignoring any existing
@@ -118,6 +128,16 @@ OPTIONS
               --import, or --locate, which all require it), or --force;
               combining with --dry-run is a redundant no-op and is permitted.
               See EXIT STATUS below.
+
+       --remove
+              Remove the user.sumtag xattr from every file in the tree. A
+              testing/reset utility, not a data-integrity primitive: no mtime
+              comparison, no hashing, just an unconditional delete of
+              whatever attribute happens to be present. Files with no
+              attribute are left alone. Combined with --dry-run, previews
+              which files would lose their stamp without removing anything.
+              Cannot be combined with --database (nor --sum, --import, or
+              --locate, which all require it), --verify, or --force.
 
        --no-ignore
               Disregard all @sumtag-ignore marker files for this run,

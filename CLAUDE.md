@@ -210,6 +210,14 @@ Without the mtime gate, every normally-edited file would read as a mismatch; wit
 
 **Conflicts:** `--verify` + `--database` (and so also `--sum`, `--import`, `--locate`, which all require `--database`) is an error — on a mismatch there is no non-arbitrary answer to *which* digest to store (the trusted stored one, or the freshly computed one under suspicion); the ambiguity is the proof they should not combine, and all three actions write to the database. `--verify` + `--force` is an error (force writes; verify must not). `--verify` + `-n` is a redundant no-op (verify is already side-effect-free) and is allowed.
 
+## Removing stamps (`--remove`)
+
+`--remove` strips the `user.sumtag` xattr from every file in the tree. It exists as a **testing/reset utility** — a fast way to return a scratch corpus to its unstamped state between test runs — not as a data-integrity primitive; it carries none of `--verify`'s ceremony because it isn't inspecting anything, just deleting an attribute.
+
+There is no mtime comparison and nothing is computed: a file either has a `user.sumtag` xattr (deleted) or doesn't (silently left alone, reported as a skip gated behind `-v`, same as any other skip). The per-file announcement follows the same bare-path/`-v` rule as every other announcement (see Status lines): `remove <path>` with `-v`, bare path without it, `would remove <path>` under `--dry-run`.
+
+**Conflicts:** `--remove` + `--database` (and so also `--sum`, `--import`, `--locate`) is an error — `--remove` only ever touches the xattr, never the database, so there is nothing for a database flag to do. `--remove` + `--verify` is an error (one reads and compares, the other deletes; they cannot both be the run's mode). `--remove` + `--force` is an error — `--force` overrides a re-hash *decision*, and `--remove` has no decision to override, it always removes whatever is present. `--remove` + `-n` is allowed and is the intended way to preview what would be removed before doing it.
+
 ## Future work (designed-for, not built)
 
 These are deliberately deferred; the formats above are shaped now so adding them later is additive, not a migration.
@@ -308,25 +316,56 @@ With no directory arguments, cwd is processed. Explicit paths override that defa
 | `--verify` | | bool | Read-only: recompute each file's checksum and compare it to the stored digest, reporting mismatches (corruption). Writes nothing. Exit `0`/`1`/`2` = intact/corruption/errors. |
 | `--no-ignore` | | bool | Disregard all `@sumtag-ignore` marker files for this run, processing every directory regardless of markers. |
 | `--locate` | | bool | Stat every file visited and write the `os.stat()` metadata to the database, regardless of whether xattr work was done; implies `--import`. Requires `--database`. Useful as a periodic filesystem inventory pass (analogous to `updatedb`). |
+| `--si` | | bool | Display sizes and rates in `--progress` using decimal (SI, powers-of-1000: `kB`/`MB`/`GB`) units instead of the default binary (powers-of-1024: `KiB`/`MiB`/`GiB`) units. |
+| `--remove` | | bool | Remove the `user.sumtag` xattr from every file in the tree (see Removing stamps). A testing/reset utility, not a data-integrity primitive. Composes with `-n` to preview. |
 
-`-q` and `-v` together are an error. `--force` and `--dry-run` together are an error. `--sum`, `--import`, and `--locate` are parallel, combinable actions performed on `--database` (see Database storage); each requires `--database`, and `--database` requires at least one of them. `--force` and `--import` together are **allowed**: `--import`'s refusal to compute is a default, not a hard restriction, and `--force` is the flag whose whole job is overriding defaults about what gets (re-)computed — so `--force --import` re-hashes every file and mirrors the result. The same override applies to `--force --locate`, since `--locate` implies `--import`. `--verify` conflicts with `--database` (and so `--sum`, `--import`, `--locate`) and `--force` (see Verification); `--verify -n` is a redundant no-op and is allowed. `--progress` and `-q` conflict: whichever appears later on the command line wins, with a warning to stderr. `--force` does **not** override `@sumtag-ignore` markers (see Ignore markers); use `--no-ignore` to process exempted directories.
+`-q` and `-v` together are an error. `--force` and `--dry-run` together are an error. `--sum`, `--import`, and `--locate` are parallel, combinable actions performed on `--database` (see Database storage); each requires `--database`, and `--database` requires at least one of them. `--force` and `--import` together are **allowed**: `--import`'s refusal to compute is a default, not a hard restriction, and `--force` is the flag whose whole job is overriding defaults about what gets (re-)computed — so `--force --import` re-hashes every file and mirrors the result. The same override applies to `--force --locate`, since `--locate` implies `--import`. `--verify` conflicts with `--database` (and so `--sum`, `--import`, `--locate`) and `--force` (see Verification); `--verify -n` is a redundant no-op and is allowed. `--remove` conflicts with `--database` (and so `--sum`, `--import`, `--locate`), `--verify`, and `--force` — for the same reason as `--verify`, it is its own standalone mode, and there is no re-hash decision for `--force` to override; `--remove -n` is allowed and is the way to preview it. `--progress` and `-q` conflict: whichever appears later on the command line wins, with a warning to stderr. `--force` does **not** override `@sumtag-ignore` markers (see Ignore markers); use `--no-ignore` to process exempted directories.
 
 ### Status lines
 
-Sumtag's default (non-quiet) output is an *announcement*, not a completion report: for any file about to be checksummed, the line prints **before** the read begins — `hash <path> (<reason>)` for a stamp, `verify <path>` for `--verify` — using present/imperative verbs, not past tense (`hash`/`import`, not `hashed`/`imported`). This is what makes `--progress` legible: the path is already on screen by the time a slow file's live bar appears at the 5-second mark, rather than the bar being the first anyone hears of that file.
+Sumtag's default (non-quiet) output is an *announcement*, not a completion report: for any file about to be checksummed, a line prints **before** the read begins. **Without `-v`, that line is the bare path and nothing else** — no verb, no reason, just the path, so `sumtag --sum` over a large tree stays clean and skimmable. **With `-v`**, the same announcement expands to the full form — `hash <path> (<reason>)` for a stamp, `verify <path>` for `--verify`, `import <path>` for a propagated import, `would hash <path> (<reason>)` under `--dry-run` — using present/imperative verbs, not past tense (`hash`/`import`, not `hashed`/`imported`). This bare-path/`-v` split applies uniformly to every routine per-file announcement (stamp, dry-run preview, import, and the no-usable-metadata report under `--import`/`--locate`); it does **not** apply to `--progress`, which is unaffected by `-v` and appears regardless, nor to the deviation lines below. The path being on screen before the read begins is also what makes `--progress` legible: it's already there by the time a slow file's live bar appears at the 5-second mark, rather than the bar being the first anyone hears of that file.
 
-A clean outcome earns no further line — silence means nothing bad happened. `--verify`'s successful case in particular prints nothing beyond its `verify <path>` announcement (no `ok` line); the announcement already was the record. Only a *deviation* from clean earns a second line: `CORRUPT <path>` (mismatch), `stale <path> (modified since hash; restamp needed)` (legitimately edited, not corrupt — surfaced unconditionally, like `rsync` noting a file changed mid-transfer), or an error via the normal error channel (`sumtag: <path>: <error>`; the file is skipped and the run continues). `unverifiable <path>` replaces the announcement outright when there's no usable xattr to check against, since no read is even attempted.
+A clean outcome earns no further line — silence means nothing bad happened. `--verify`'s successful case in particular prints nothing beyond its announcement (no `ok` line); the announcement already was the record. Only a *deviation* from clean earns a second line, and these are **unconditional — shown with their label regardless of `-v`**, since they are alarms, not the routine "why was this touched" detail that `-v` exists to add: `CORRUPT <path>` (mismatch), `stale <path> (modified since hash; restamp needed)` (legitimately edited, not corrupt — surfaced unconditionally, like `rsync` noting a file changed mid-transfer), `unverifiable <path>` (no usable xattr to check against; replaces the announcement outright since no read is even attempted), or an error via the normal error channel (`sumtag: <path>: <error>`; the file is skipped and the run continues).
 
-`skip <path> (<reason>)` — a file already up-to-date, nothing done — stays gated behind `-v`: a repeat run over an already-stamped archive stays quiet by default, with `-v` available for the full per-file accounting.
+`skip <path> (<reason>)` — a file already up-to-date, nothing done — stays gated behind `-v` entirely, with no bare-path line either: a repeat run over an already-stamped archive stays completely silent by default, with `-v` available for the full per-file accounting.
 
 ### `--progress` indicator
 
-`--progress` is triggered by *time*, not file size: a modest file on a slow network mount is just as worth watching as a huge one on fast local storage, and a huge file that happens to finish quickly needs no indicator at all. Concretely: once a single file's checksum has been computing for more than 5 seconds, a live line appears on stderr — redrawn in place (`\r`, throttled to a few updates per second), showing bytes read against the file's total size — and is cleared the moment that file's hash completes. A file that finishes under the threshold shows nothing at all.
+`--progress` is triggered by *time*, not file size: a modest file on a slow network mount is just as worth watching as a huge one on fast local storage, and a huge file that happens to finish quickly needs no indicator at all. Concretely: once a single file's checksum has been computing for more than 5 seconds, a live line appears on stderr — redrawn in place (`\r`, throttled to a few updates per second) — and is cleared the moment that file's hash completes. A file that finishes under the threshold shows nothing at all.
 
 This is deliberately independent of `-v`/`--verbose`: verbosity is a durable, appended log of *why* each file got the decision it did (fine to redirect into a file), while `--progress` is an ephemeral, redrawn-in-place indicator of *how far through* the current file the run is (meaningless once redirected). Composing them is normal — with both given, the per-file announcement (`hash <path> (reason)` or `verify <path>`) prints first; then, if that file turns out to be slow, the live bar appears and redraws in place until the hash completes.
 
 `--progress` is suppressed outright when stderr is not a terminal (a redirected log or pipe), since carriage-return redraws would just corrupt it rather than show anything useful.
 
+#### Line format
+
+```
+{size:>8}  {rate:>10}  [{bar}] {pct:>3}%  {elapsed:>8}  ETA {eta:<7}
+```
+
+Example at 80 columns (binary units, the default):
+
+```
+ 99.3GiB   40.1MiB/s  [========================>   ]  84%   0:05:12  ETA 58s
+```
+
+Same file with `--si`:
+
+```
+  106.6GB   42.1MB/s  [========================>   ]  84%   0:05:12  ETA 58s
+```
+
+Fields, left to right:
+
+- **size** — the file's total size, human-readable: binary (powers-of-1024: `KiB`/`MiB`/`GiB`) by default, decimal (powers-of-1000: `kB`/`MB`/`GB`) with `--si`.
+- **rate** — current computed throughput, same unit convention as size, suffixed `/s`.
+- **bar** — pv-style: `=` for the filled portion, `>` as the leading edge, spaces for the remainder, enclosed in `[...]`.
+- **pct** — percentage complete, outside the bar.
+- **elapsed** — time spent hashing the current file, `H:MM:SS`.
+- **eta** — literal `ETA` followed by the estimated time remaining, in a compact human duration (`45s`, `5m12s`, `1h05m`) — deliberately distinct from elapsed's clock style, since one is a fact and the other an estimate.
+
+At 80 columns, every field except the bar has a fixed width, so the bar absorbs whatever width remains (28 characters at 80 columns given the widths above) and is the only field whose width varies. This matters for a future enhancement: handling `SIGWINCH` to resize the bar to the terminal's current width without touching any other field's layout or triggering jitter in the numbers.
+
 `-q` and `-v` use `action='count'` in argparse, so `-vv` and `-v -v` are equivalent.
 
-Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--locate`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.
+Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--locate`, `--si`, `--remove`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.

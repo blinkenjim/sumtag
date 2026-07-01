@@ -64,6 +64,19 @@ if _IS_MACOS:
         if _libc.setxattr(p, n, value, len(value), 0, 0) < 0:
             _raise_errno(str(path))
 
+    # int removexattr(const char *path, const char *name, int options)
+    _libc.removexattr.restype = ctypes.c_int
+    _libc.removexattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+
+    def remove(path, name: str) -> bool:
+        """Delete the attribute; return whether it was present to delete."""
+        p, n = os.fsencode(path), name.encode()
+        if _libc.removexattr(p, n, 0) < 0:
+            if ctypes.get_errno() == _ENOATTR:
+                return False
+            _raise_errno(str(path))
+        return True
+
 else:  # Linux and other os.*xattr platforms
 
     import errno
@@ -80,3 +93,13 @@ else:  # Linux and other os.*xattr platforms
 
     def set(path, name: str, value: bytes) -> None:  # noqa: A001 - mirrors os.setxattr
         os.setxattr(path, name, value)
+
+    def remove(path, name: str) -> bool:
+        """Delete the attribute; return whether it was present to delete."""
+        try:
+            os.removexattr(path, name)
+            return True
+        except OSError as e:
+            if e.errno in _ENOATTR:
+                return False
+            raise

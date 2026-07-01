@@ -37,6 +37,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="explain each decision; -vv adds deep internals")
     parser.add_argument("--progress", action="store_true",
                         help="show within-file progress for large files")
+    parser.add_argument("--si", action="store_true",
+                        help="display --progress sizes/rates in decimal (SI) "
+                             "units instead of binary (KiB/MiB/GiB)")
     parser.add_argument("-f", "--force", action="store_true",
                         help="re-hash every file, ignoring existing metadata")
     parser.add_argument("--database", metavar="VALUE",
@@ -53,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--verify", action="store_true",
                         help="recompute and compare against stored checksums "
                              "(read-only); writes nothing")
+    parser.add_argument("--remove", action="store_true",
+                        help="remove the user.sumtag xattr from every file in "
+                             "the tree (a testing/reset utility)")
     parser.add_argument("--no-ignore", action="store_true",
                         help="disregard @sumtag-ignore marker files")
     parser.add_argument("--locate", action="store_true",
@@ -89,6 +95,19 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
             parser.error("--verify cannot be combined with --import")
         if args.locate:
             parser.error("--verify cannot be combined with --locate")
+    if args.remove:
+        if args.database:
+            parser.error("--remove cannot be combined with --database")
+        if args.sum:
+            parser.error("--remove cannot be combined with --sum")
+        if args.do_import:
+            parser.error("--remove cannot be combined with --import")
+        if args.locate:
+            parser.error("--remove cannot be combined with --locate")
+        if args.verify:
+            parser.error("--remove cannot be combined with --verify")
+        if args.force:
+            parser.error("--remove cannot be combined with --force")
     # --progress vs -q is resolved by command-line order, not rejected here --
     # see _resolve_progress_quiet, which needs the raw argv argparse discards.
 
