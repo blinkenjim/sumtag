@@ -13,8 +13,9 @@ xxh3 is sumtag's actual shipped default (see CLAUDE.md), so this checks
 whatever a normal `sumtag --sum` run already produced -- no need to flip
 sumtag.schema.ALGO for a special test run first.
 
-xxhsum is not in the OS by default; install it via MacPorts
-(`sudo port install xxhash`) or your platform's equivalent.
+xxhsum is not in the OS by default; install it via MacPorts on macOS
+(`sudo port install xxhash`), apt on Debian/Ubuntu (`sudo apt install xxhash`),
+or your platform's equivalent.
 
 Usage:
     python3 scripts/xxh3_crosscheck.py [-v] DIRECTORY...
@@ -116,7 +117,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if shutil.which("xxhsum") is None:
         print("xxh3_crosscheck: xxhsum not found on PATH "
-             "(install via `sudo port install xxhash` or your platform's equivalent)",
+             "(install via `sudo port install xxhash` on macOS, "
+             "`sudo apt install xxhash` on Debian/Ubuntu, "
+             "or your platform's equivalent)",
              file=sys.stderr)
         return EXIT_ERRORS
 

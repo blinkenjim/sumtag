@@ -282,6 +282,7 @@ sumtag = "sumtag.cli:main"
 ### Installing
 
 - **Development:** `pip install -e .` — editable install; the `sumtag` command is available immediately while source stays editable in place.
+- **Development environment for this repo specifically:** the working tree lives in a Dropbox-synced folder, and Dropbox ignores `.gitignore` — a `.venv` built on one machine would sync to the others as broken symlinks and wrong-OS binaries. Each machine therefore keeps its own machine-local venv: run `scripts/setup-venv.sh` once per machine. It rebuilds `.venv` with the local `python3` (with a fallback for Debian/Ubuntu systems that lack `ensurepip`), marks the directory with Dropbox's `com.dropbox.ignored` xattr so it never syncs, and does the editable install. A `.venv` that shows up broken or missing means the ignore xattr was lost (or the machine was never set up) — rerun the script.
 - **End users:** `pipx install sumtag` is the recommended path. pipx isolates sumtag and its `xxhash` dependency in their own venv and puts `sumtag` on `PATH` globally, without polluting system or project environments — the modern norm for standalone Python CLIs. A plain `pip install sumtag` also works.
 
 ## CLI usage
