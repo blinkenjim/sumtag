@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
-"""Independently cross-check sumtag's stamped MD5 digests against md5sum.
+"""Independently cross-check sumtag's stamped XXH3 digests against xxhsum.
 
 A standalone verification tool, deliberately separate from sumtag's own code
 (same spirit as tests/harness/'s oracle): it reads the raw user.sumtag xattr
 without importing anything from the sumtag package, and gets its "truth"
-digest by shelling out to the OS md5sum binary rather than hashing in Python.
-Two independent code paths agreeing is a much stronger signal than one path
-checking itself.
+digest by shelling out to the OS xxhsum binary (-H3, i.e. XXH3-64 -- verified
+byte-for-byte identical to xxhash.xxh3_64_hexdigest) rather than hashing in
+Python. Two independent code paths agreeing is a much stronger signal than
+one path checking itself.
 
-This only compares the "md5" entry in the xattr's digests map. sumtag's
-shipped default is XXH3 (see CLAUDE.md); to produce MD5-stamped files, flip
-sumtag.schema.ALGO to "md5" for the run you want to cross-check, then point
-this script at the same directory afterward.
+xxh3 is sumtag's actual shipped default (see CLAUDE.md), so this checks
+whatever a normal `sumtag --sum` run already produced -- no need to flip
+sumtag.schema.ALGO for a special test run first.
+
+xxhsum is not in the OS by default; install it via MacPorts
+(`sudo port install xxhash`) or your platform's equivalent.
 
 Usage:
-    python3 scripts/md5_crosscheck.py [-v] DIRECTORY...
+    python3 scripts/xxh3_crosscheck.py [-v] DIRECTORY...
 
 Exit codes (mirrors sumtag --verify's convention):
-    0   every file with a stored md5 digest matched
+    0   every file with a stored xxh3 digest matched
     1   one or more mismatches found
-    2   files with no usable md5 digest to check, or read errors
+    2   files with no usable xxh3 digest to check, or read errors
 """
 
 from __future__ import annotations
@@ -69,10 +72,16 @@ def read_xattr(path: str) -> bytes | None:
             raise
 
 
-def md5sum(path: str) -> str:
-    """Return the lowercase-hex MD5 digest of path, via the OS md5sum binary."""
-    r = subprocess.run(["md5sum", path], capture_output=True, text=True, check=True)
-    return r.stdout.split()[0].lower()
+def xxh3sum(path: str) -> str:
+    """Return the lowercase-hex XXH3-64 digest of path, via xxhsum -H3.
+
+    xxhsum prefixes its output with the algorithm name (e.g.
+    "XXH3_e86599851ff7dc58  path"), unlike md5sum's bare hex -- strip
+    everything up to the last underscore to get just the digest.
+    """
+    r = subprocess.run(["xxhsum", "-H3", path], capture_output=True, text=True, check=True)
+    token = r.stdout.split()[0]
+    return token.rsplit("_", 1)[-1].lower()
 
 
 def iter_files(roots: list[str]):
@@ -88,7 +97,7 @@ def iter_files(roots: list[str]):
         for dirpath, dirnames, filenames in os.walk(root):
             if IGNORE_MARKER in filenames:
                 dirnames[:] = []
-                print(f"md5_crosscheck: {dirpath}: @sumtag-ignore present, pruned",
+                print(f"xxh3_crosscheck: {dirpath}: @sumtag-ignore present, pruned",
                      file=sys.stderr)
                 continue
             for name in filenames:
@@ -105,8 +114,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="also print a line for every matching file")
     args = parser.parse_args(argv)
 
-    if shutil.which("md5sum") is None:
-        print("md5_crosscheck: md5sum not found on PATH", file=sys.stderr)
+    if shutil.which("xxhsum") is None:
+        print("xxh3_crosscheck: xxhsum not found on PATH "
+             "(install via `sudo port install xxhash` or your platform's equivalent)",
+             file=sys.stderr)
         return EXIT_ERRORS
 
     matched = mismatched = unusable = errors = 0
@@ -127,13 +138,13 @@ def main(argv: list[str] | None = None) -> int:
                 unusable += 1
                 continue
 
-            stored = digests.get("md5")
+            stored = digests.get("xxh3")
             if stored is None:
-                print(f"NO-MD5     {path} (digests present: {sorted(digests)})")
+                print(f"NO-XXH3    {path} (digests present: {sorted(digests)})")
                 unusable += 1
                 continue
 
-            computed = md5sum(path)
+            computed = xxh3sum(path)
             if computed == stored.lower():
                 matched += 1
                 if args.verbose:

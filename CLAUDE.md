@@ -44,17 +44,19 @@ For each file in a directory tree, sumtag:
 
 ### Digest container (`digests`)
 
-Hash values live in a nested `digests` object keyed by algorithm name (`{ "xxh3": "<hex>" }`), **not** as top-level keys. Today only `xxh3` is computed, so the map has one entry; the nested shape exists so future versions can support alternate digests (e.g. `md5`) with no format migration.
+Hash values live in a nested `digests` object keyed by algorithm name (`{ "xxh3": "<hex>" }`), **not** as a flat `digest` field. Today only `xxh3` is computed, so the map holds exactly one entry; keying by algorithm name (rather than a bare `digest` string) is what lets a future `--digest` flag select `md5` instead — `{ "md5": "<hex>" }` — with no change to the shape of the value itself.
 
 The `xxh3` value is the **64-bit** XXH3 variant (`xxhash.xxh3_64_hexdigest`), a 16-character lowercase-hex string. (Pinned 2026-06-13. 64-bit is sufficient for per-file corruption detection — intent #1 compares a file to its own prior hash — and keeps the xattr compact; the higher collision odds of 64-bit only bear on cross-corpus dedup, intent #2, which is left to higher-level tooling.)
 
-Rationale — this is the cheapest moment to fix the on-disk shape, since no files have been stamped yet, and the xattr is the source of truth that travels into static archives (expensive to migrate later):
+**The map holds exactly one entry, ever — never more than one algorithm at a time (decided 2026-07-02).** An earlier idea was to let the map accumulate additively (`{ "xxh3": "...", "md5": "..." }`), so that switching the active algorithm would only ever *add* coverage, never disturb what was already there. That was rejected for two reasons:
 
-- **Additive, not breaking.** Adding a digest later is `{ "xxh3": "...", "md5": "..." }`. Old readers still find `xxh3`; it does not force a major-version bump or a re-hash of files that don't need the new algorithm.
-- **Generic iteration.** Readers and the database walk `digests` without a hardcoded list of which top-level keys are algorithms.
-- **One shape for one or many.** Selecting a single algorithm and carrying several at once are the same format.
+- **The shared `file_mtime` only makes sense for one digest.** Every entry in the map is assumed computed at the single top-level `file_mtime`. Keeping two algorithms "in sync" would mean every future re-hash has to recompute *every* previously-added algorithm, not just the current one — or else that shared-timestamp invariant silently breaks the moment only one gets refreshed. Per-digest timestamps were considered and rejected as unneeded complexity, not deferred as future work — so the shared timestamp holds only because there is exactly one digest.
+- **It would outrun the database mirror.** The `files` table is already one-digest-per-file-location (see Database storage's Schema section); a multi-algorithm xattr would have nothing consistent to mirror into without a child-`digests`-table migration that isn't planned (see that section).
 
-All digests present in the map are assumed computed at the single top-level `file_mtime`. If a future version adds a digest to a file that already has one, restamp them together so they stay consistent. If per-digest timing ever becomes necessary, a map value can grow from a bare hex string into a small object — covered by the `version` major-bump escape hatch. (Future work; not now.)
+So instead: whichever algorithm is currently active computes the file's digest and **replaces** the map's single entry — it never merges alongside a prior algorithm's entry. Re-hashing logic below covers when that replacement happens. The map shape itself is unaffected by this policy — it was always generic enough to hold one algorithm today and a different one tomorrow:
+
+- **No format migration for a new algorithm.** A future `--digest md5` run produces `{ "md5": "<hex>" }` instead of `{ "xxh3": "<hex>" }` — same shape, different key, no version bump.
+- **Generic iteration.** Readers and the database walk `digests` without hardcoding which key is the algorithm; `--verify` in particular just recomputes and compares whichever key happens to be present.
 
 ## Re-hashing logic
 
@@ -64,7 +66,8 @@ A file is (re-)hashed when any of the following are true:
 - The `user.sumtag` xattr is absent or unreadable.
 - The `file_mtime` in the xattr is older than the file's current mtime.
 - The `version` in the xattr has a lower major version number than the current software (semver major bump = re-hash by default).
-- A requested digest algorithm is missing from the `digests` map. (Future: when alternate algorithms are selectable, asking for one a file lacks computes *that* algorithm; existing digests are untouched. Today only `xxh3` is requested.)
+
+Freshness is **algorithm-agnostic**: a file with *any* current digest — regardless of which algorithm produced it — counts as up to date. Switching which algorithm is currently active (a future `--digest` flag; today there is only `xxh3`) never by itself triggers a re-hash. This matters at scale: someone with terabytes already stamped under one algorithm shouldn't have every file re-read from disk just because a newer algorithm became the default. When a re-hash *does* happen for one of the reasons above, it computes under whichever algorithm is currently active and replaces the file's single stored digest (see "Digest container" above) rather than adding a second algorithm alongside the first. To deliberately re-stamp an entire archive under a new algorithm without waiting for files to change naturally, use `--force`.
 
 The major-version rule may have exceptions: if a future major release determines that existing xattr metadata produced by an older major version is still valid (e.g., the hash algorithm and schema are unchanged), it may explicitly whitelist those older major versions and skip re-hashing. This is a case-by-case decision made at the time of each major release.
 
@@ -156,12 +159,12 @@ CREATE INDEX idx_digest ON files(digest);
 
 - The **mountpoints** table normalizes the mount point, which repeats across many files; rows in `files` reference it by integer id rather than storing the full path over and over.
 - A file's **identity** is its location, `(mountpoint_id, rel_path)` — a given path on a given filesystem is exactly one file. This is the UPSERT target: re-scanning a file updates its row in place (`INSERT ... ON CONFLICT DO UPDATE`).
-- The digest column is **generically named** (`algo` + `digest`, not `md5`) so the same schema holds whatever algorithm the xattr carries — the future-digest decision recorded under the xattr schema, applied to the mirror. Dedup queries group by `(algo, digest)`.
+- The digest column is **generically named** (`algo` + `digest`, not `md5`) so the same schema holds whatever algorithm the xattr carries — the future-digest decision recorded under the xattr schema, applied to the mirror. Dedup queries group by `(algo, digest)`. **Known hazard:** grouping by `(algo, digest)` scopes duplicate detection to a single algorithm at a time — two byte-identical files stamped under different algorithms (e.g. one `xxh3`, one `md5`, from before/after a `--digest` switch) will *not* be found as duplicates by this query, since their digests are unrelated numbers even though the underlying bytes match. This is a silent false-negative risk, not a false-positive one. Closing it is higher-level tooling's job (see Future work), not sumtag's — e.g. a deliberate `--force` backfill to unify a corpus under one algorithm before deduping, or dedup tooling that detects a mixed-algorithm candidate set and falls back to a live comparison.
 - `digest` is an **index, not a unique key**. Duplicate detection depends on multiple files sharing a hash, so the hash *must* be allowed to repeat. The index makes grouping/sorting by hash fast (`SELECT algo, digest, COUNT(*) FROM files GROUP BY algo, digest HAVING COUNT(*) > 1`).
 - `inode` records the filesystem inode number at stamp time. Its primary use is a safety check before any dedup deletion: two files with the same digest but different inodes are distinct copies; two with the same inode are hard links to the same data — deleting one would not free space and could appear to delete the "only" copy. The inode is not indexed; dedup candidates are first narrowed by digest, then the inode check eliminates hard-link false positives.
 - The **locate columns** (`size`, `mode`, `uid`, `gid`, `nlink`, `dev`, `ctime`, `atime`, `birthtime`) mirror `os.stat()` output. They are nullable: a row written without `--locate` has them NULL until a future `--locate` run fills them in; a stat-less update uses `COALESCE` in the UPSERT so it never clobbers data already written. `file_mtime` and `inode` are already in the primary columns and are not duplicated here. `birthtime` is macOS-only; it is NULL on Linux and other platforms.
 - Both tables rely on SQLite's implicit `rowid` as their physical key; no primary key on `files` is needed beyond the `UNIQUE` constraint and the `digest` index.
-- One row holds one digest per file location. If a future version stores **multiple** digests per file simultaneously, this moves to a child `digests` table keyed by file. That migration is deferred and acceptably cheap: the database is a rebuildable mirror of the xattrs, unlike the xattr format itself.
+- One row holds one digest per file location — this matches the xattr's own one-digest-at-a-time policy (see "Digest container"), so the database never needs to represent more than the xattr does. A child `digests` table keyed by file was considered for a hypothetical future where the xattr accumulates multiple simultaneous algorithms, but that idea was rejected (see "Digest container"), so this migration is not expected to be needed.
 
 Optional future refinement: a `runs` table keyed on `run_started_at`, referenced from `files`, to normalize the repeated run timestamp and support "how many sessions stamped this corpus" analysis. Not built initially — a single denormalized timestamp column is fine to start.
 
@@ -222,10 +225,10 @@ There is no mtime comparison and nothing is computed: a file either has a `user.
 
 These are deliberately deferred; the formats above are shaped now so adding them later is additive, not a migration.
 
-- **Alternate digest algorithms** (e.g. `md5`) — selectable via a future `--digest` flag (default `xxh3`). Stored in the `digests` map; DB columns are already generic (`algo`/`digest`).
+- **Alternate digest algorithms** (e.g. `md5`) — selectable via a future `--digest` flag (default `xxh3`). Stored in the `digests` map (one entry at a time, replaced on re-hash — see "Digest container" and "Re-hashing logic"); DB columns are already generic (`algo`/`digest`). Switching the active algorithm never forces a re-hash of already-current files by itself (freshness is algorithm-agnostic); use `--force` to deliberately re-stamp an archive under a new algorithm.
 - **Network database backends** — MySQL/MariaDB and Postgres via `--database=scheme://…`. The value grammar and `open_store()`/`Store` seam are fixed now; only SQLite is implemented.
 - **`runs` table** — normalize the repeated `run_started_at` (see Database storage).
-- **Stale-row pruning**, **duplicate detection**, and **richer audit tooling** (aggregate reporting, scheduled scrubs, quarantine, repair-from-replica) — higher-level tooling, outside sumtag's single-purpose scope. Note: basic single-pass verification *is* built in (`--verify`); what stays out is everything that aggregates or acts on the results.
+- **Stale-row pruning**, **duplicate detection**, and **richer audit tooling** (aggregate reporting, scheduled scrubs, quarantine, repair-from-replica) — higher-level tooling, outside sumtag's single-purpose scope. Note: basic single-pass verification *is* built in (`--verify`); what stays out is everything that aggregates or acts on the results. Whatever builds duplicate detection on top of the database should account for the mixed-algorithm hazard noted in Database storage's Schema section — e.g. by scanning the candidate file sets for more than one `algo` value before comparing, warning about the apples-to-oranges risk, and confirming before proceeding (with a non-interactive override for scripted use, since this guidance is for a separate tool and doesn't bind sumtag's own no-prompts CLI).
 
 ## Platform targets
 

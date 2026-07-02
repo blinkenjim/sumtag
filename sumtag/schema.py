@@ -24,7 +24,7 @@ VERSION = __version__
 #: ``hashing._HASHERS`` for the set of algorithms actually implemented.
 #: A real ``--digest`` CLI selector is future work; today this is a
 #: code-level constant, not a flag.
-ALGO = "md5"
+ALGO = "xxh3"
 
 
 def major_of(version: str) -> int:
