@@ -1,9 +1,9 @@
 """Command-line interface for sumtag.
 
-Early stub: the argument parser and the conflict validation reflect the design
-in CLAUDE.md and sumtag(1), but the traversal, hashing, xattr I/O, database,
-and verify logic are not implemented yet. ``main()`` returns an int exit code
-(see EXIT STATUS in sumtag(1)).
+Defines the argument parser and the flag-conflict validation (both reflecting
+CLAUDE.md and sumtag(1)), then hands off to :mod:`sumtag.engine` for the actual
+traversal, hashing, xattr I/O, database, and verify work. ``main()`` returns an
+int exit code (see EXIT STATUS in sumtag(1)).
 """
 
 from __future__ import annotations

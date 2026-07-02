@@ -118,7 +118,7 @@ def _hash_decision(meta, live: str, args, current_major: int,
     predicted.
     """
     if use_standard_decision:
-        return decide.should_rehash(meta, live, args.force, [schema.ALGO], current_major)
+        return decide.should_rehash(meta, live, args.force, current_major)
     rehash = args.force
     reason = "forced" if args.force else "not computing (--import/--locate only)"
     return rehash, reason

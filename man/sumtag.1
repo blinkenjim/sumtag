@@ -43,9 +43,13 @@ attribute is absent or unreadable;
 .IP \(bu 3
 the stored modification time is older than the file's current mtime;
 .IP \(bu 3
-the stored schema version has a lower major number than the running software;
-.IP \(bu 3
-a requested digest algorithm is absent from the stored metadata.
+the stored schema version has a lower major number than the running software.
+.PP
+Freshness is algorithm-agnostic: a file with any current digest, regardless of
+which algorithm produced it, counts as up to date. A stored digest is never
+recomputed merely because a different algorithm is now preferred; when a
+re-hash does happen for one of the reasons above, it replaces the file's
+single stored digest rather than keeping the old one alongside it.
 .SH OPTIONS
 .TP
 .BR \-n ", " \-\-dry\-run

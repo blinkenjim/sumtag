@@ -14,7 +14,6 @@ def should_rehash(
     meta: dict | None,
     live_mtime: str,
     force: bool,
-    requested_algos: list[str],
     current_major: int,
 ) -> tuple[bool, str]:
     """Decide whether a file must be (re-)hashed, and why.
@@ -29,10 +28,13 @@ def should_rehash(
         return True, "no usable metadata"
     if schema.major_of(meta["version"]) < current_major:
         return True, "older major version"
-    digests = meta.get("digests", {})
-    for algo in requested_algos:
-        if algo not in digests:
-            return True, f"missing digest: {algo}"
+    # Freshness is algorithm-agnostic (CLAUDE.md "Re-hashing logic"): a file
+    # with *any* current digest counts as up to date, whichever algorithm
+    # produced it. Only a genuinely empty map (no digest at all) re-hashes;
+    # switching the active algorithm never does, so an archive stamped under
+    # one algorithm is not re-read wholesale when the default changes.
+    if not meta.get("digests"):
+        return True, "no digest present"
     # ISO 8601 UTC strings of fixed width compare lexicographically as time does.
     if meta["file_mtime"] < live_mtime:
         return True, "file modified since last hash"
