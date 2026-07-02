@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 name = "sumtag"
 version = "0.1.0"
 description = "Stamp files with an XXH3 checksum and metadata in an extended attribute, for silent-corruption and duplicate detection."
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = ["xxhash"]
 # TODO: fill in authors, license, readme, classifiers before publishing.
 

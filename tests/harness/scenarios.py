@@ -1,0 +1,405 @@
+"""The scenario catalog — CLAUDE.md's behavior tables made runnable.
+
+Each :class:`Scenario` declares a starting tree (:class:`~tests.harness.corpus.Corpus`),
+an optional ``mutate`` step that disturbs the tree after it is stamped but before
+sumtag runs, the ``argv`` to pass to sumtag, and a ``check`` that inspects the
+real on-disk result and records any failures.
+
+Written test-first: run against today's stub, the scenarios that require sumtag
+to *act* (stamp, re-hash, detect corruption) go red, while the ones satisfied by
+*inaction* (skip, prune, dry-run) pass trivially — which is exactly correct.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+from .corpus import Corpus, FileSpec, PreStamp
+from . import oracle
+
+
+@dataclass
+class RunResult:
+    """What the sumtag subprocess returned."""
+
+    exit_code: int
+    stdout: str
+    stderr: str
+
+
+class Checker:
+    """Accumulates assertion failures so one run reports every problem at once."""
+
+    def __init__(self) -> None:
+        self.failures: list[str] = []
+
+    def expect(self, condition: bool, message: str) -> None:
+        if not condition:
+            self.failures.append(message)
+
+
+@dataclass
+class Scenario:
+    name: str
+    description: str
+    corpus: Corpus
+    argv: list[str]
+    check: Callable[[Path, RunResult, Checker], None]
+    mutate: Callable[[Path], None] | None = None
+    # Extra sumtag invocations run before the checked run (e.g. to seed a prior
+    # database state). The token "{db}" is substituted in argv and extra_runs.
+    extra_runs: list[list[str]] = field(default_factory=list)
+
+
+def _db_for(root: Path) -> str:
+    """The database path the runner created alongside this scenario's tree."""
+    return str(root) + ".sqlite"
+
+
+# --- mutate helpers -------------------------------------------------------
+
+
+def _corrupt_silently(relpath: str) -> Callable[[Path], None]:
+    """Overwrite a file's bytes but restore its exact mtime — silent corruption."""
+
+    def mutate(root: Path) -> None:
+        p = root / relpath
+        ns = p.stat().st_mtime_ns
+        p.write_bytes(b"CORRUPTED-CONTENT" * 16)
+        os.utime(p, ns=(ns, ns))  # reset mtime: the corruption leaves no mtime trace
+
+    return mutate
+
+
+def _edit_legitimately(relpath: str) -> Callable[[Path], None]:
+    """Overwrite a file's bytes and let its mtime advance naturally — a real edit."""
+
+    def mutate(root: Path) -> None:
+        (root / relpath).write_bytes(b"legitimately-edited-content" * 8)
+
+    return mutate
+
+
+# --- the catalog ----------------------------------------------------------
+
+
+def catalog() -> list[Scenario]:
+    scenarios: list[Scenario] = []
+
+    # 1. A file with no xattr should get stamped. (Requires action -> red vs stub.)
+    def check_fresh(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        k.expect(s.present, "expected a user.sumtag xattr to be written")
+        k.expect(s.digest_matches_content, "stored digest should match file contents")
+        k.expect(s.mtime_matches, "file_mtime should equal the file's mtime")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="fresh_file_gets_stamped",
+        description="A file with no xattr is hashed and stamped.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        argv=[],
+        check=check_fresh,
+    ))
+
+    # 2. An up-to-date file should be skipped. Prestamp a *wrong* digest with a
+    #    matching mtime: if it survives, the file was skipped. (Inaction -> green.)
+    def check_skip(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        k.expect(s.present, "xattr should still be present")
+        k.expect(not s.digest_matches_content,
+                 "up-to-date file should be skipped; the wrong digest should persist")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="uptodate_file_skipped",
+        description="A file whose recorded mtime matches is not re-hashed.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("wrong-digest"))]),
+        argv=[],
+        check=check_skip,
+    ))
+
+    # 3. A stale file (recorded mtime older than the file) should be re-hashed,
+    #    so its file_mtime catches up. (Requires action -> red vs stub.)
+    def check_stale(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        k.expect(s.mtime_matches,
+                 "stale file should be restamped so file_mtime catches up")
+        k.expect(s.digest_matches_content, "digest should match content after re-hash")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="stale_file_rehashed",
+        description="A file with an outdated recorded mtime is re-hashed.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("stale"))]),
+        argv=[],
+        check=check_stale,
+    ))
+
+    # 4. --force re-hashes even an up-to-date file, correcting a wrong digest.
+    #    (Requires action -> red vs stub.)
+    def check_force(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        k.expect(s.digest_matches_content,
+                 "--force should re-hash and correct the wrong digest")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="force_rehashes_uptodate",
+        description="--force re-hashes a file that would otherwise be skipped.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("wrong-digest"))]),
+        argv=["--force"],
+        check=check_force,
+    ))
+
+    # 5. THE marquee: silent corruption. Stamp a valid file, corrupt its bytes
+    #    without disturbing mtime, then --verify must flag it. (Action -> red.)
+    def check_corruption(root, res, k):
+        k.expect(res.exit_code == 1,
+                 f"--verify should report corruption with exit 1, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="silent_corruption_detected",
+        description="--verify flags content that changed while mtime did not.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("valid"))]),
+        mutate=_corrupt_silently("data.bin"),
+        argv=["--verify"],
+        check=check_corruption,
+    ))
+
+    # 6. A legitimate edit (content + mtime both change) is NOT corruption.
+    #    (Inaction on the exit code -> green vs stub.)
+    def check_legit_edit(root, res, k):
+        k.expect(res.exit_code == 0,
+                 f"a legitimate edit is not corruption; expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="legit_edit_not_corruption",
+        description="--verify does not flag a normally-edited file as corruption.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("valid"))]),
+        mutate=_edit_legitimately("data.bin"),
+        argv=["--verify"],
+        check=check_legit_edit,
+    ))
+
+    # 7. An @sumtag-ignore marker prunes the subtree in every mode. Wrong digest
+    #    under the marker must survive untouched. (Inaction -> green.)
+    def check_prune(root, res, k):
+        s = oracle.inspect(root / "vendor" / "blob.bin")
+        k.expect(not s.digest_matches_content,
+                 "files under an @sumtag-ignore marker must not be touched")
+
+    scenarios.append(Scenario(
+        name="ignore_marker_prunes_subtree",
+        description="A directory with @sumtag-ignore is not descended into.",
+        corpus=Corpus(
+            files=[FileSpec("vendor/blob.bin", size=256,
+                            prestamp=PreStamp("wrong-digest"))],
+            ignore_dirs=["vendor"],
+        ),
+        argv=[],
+        check=check_prune,
+    ))
+
+    # 8. --dry-run writes nothing. A fresh file must remain unstamped. (Green.)
+    def check_dryrun(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        k.expect(not s.present, "--dry-run must not write any xattr")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="dry_run_writes_nothing",
+        description="-n reports but writes no xattr.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        argv=["-n"],
+        check=check_dryrun,
+    ))
+
+    # 9. --database mirrors metadata in addition to the xattr.
+    def check_db_mirror(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        rows = oracle.read_db(_db_for(root))
+        k.expect(s.present, "xattr should still be written (mirror is in addition)")
+        k.expect(len(rows) == 1, f"expected exactly 1 db row, got {len(rows)}")
+        if rows:
+            r = rows[0]
+            k.expect(r.algo == "xxh3", f"expected algo xxh3, got {r.algo!r}")
+            k.expect(r.digest == s.actual_digest, "db digest should match content")
+            k.expect(r.rel_path.endswith("data.bin"),
+                     f"rel_path should end with data.bin, got {r.rel_path!r}")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="database_mirrors_metadata",
+        description="--database writes a row mirroring the xattr.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        argv=["--database", "{db}", "--sum"],
+        check=check_db_mirror,
+    ))
+
+    # 10. Re-scanning a file UPSERTs its row in place — no duplicate rows.
+    def check_db_upsert(root, res, k):
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1,
+                 f"re-scan should update one row, not duplicate; got {len(rows)}")
+        if rows:
+            k.expect(rows[0].digest == oracle.inspect(root / "data.bin").actual_digest,
+                     "db digest should match content after re-scan")
+
+    scenarios.append(Scenario(
+        name="database_upsert_on_rescan",
+        description="A second --database run updates the existing row in place.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        extra_runs=[["--database", "{db}", "--sum"]],            # first stamp + mirror
+        argv=["--force", "--database", "{db}", "--sum"],          # re-hash + re-mirror
+        check=check_db_upsert,
+    ))
+
+    # 11. --import copies existing xattr metadata WITHOUT computing. Prove it by
+    #     prestamping a deliberately wrong digest: it must land in the db verbatim.
+    def check_import(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1, f"expected 1 imported row, got {len(rows)}")
+        if rows:
+            k.expect(rows[0].digest != s.actual_digest,
+                     "import must copy the stored digest, not recompute it")
+            k.expect(rows[0].digest == s.stored_digest,
+                     "db digest should equal the xattr digest verbatim")
+        k.expect(not s.digest_matches_content, "import must not rewrite the xattr")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="import_copies_without_computing",
+        description="--import feeds the db from xattrs without hashing.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("wrong-digest"))]),
+        argv=["--database", "{db}", "--import"],
+        check=check_import,
+    ))
+
+    # 12. --import skips files that have no usable xattr metadata.
+    def check_import_skips(root, res, k):
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 0,
+                 f"files without metadata should not be imported; got {len(rows)} rows")
+
+    scenarios.append(Scenario(
+        name="import_skips_unstamped",
+        description="--import does not import a file that lacks an xattr.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),  # no prestamp
+        argv=["--database", "{db}", "--import"],
+        check=check_import_skips,
+    ))
+
+    # 13. -n composes with --import: previews, writes nothing — not even the db file.
+    def check_import_dryrun(root, res, k):
+        k.expect(not os.path.exists(_db_for(root)),
+                 "--import -n must not create the database")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="import_dry_run_no_writes",
+        description="--database --import -n previews without touching the db.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("valid"))]),
+        argv=["--database", "{db}", "--import", "-n"],
+        check=check_import_dryrun,
+    ))
+
+    # 14. --sum without --locate leaves the locate/stat columns NULL.
+    def check_sum_no_stat(root, res, k):
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1, f"expected 1 row, got {len(rows)}")
+        if rows:
+            k.expect(rows[0].size is None,
+                     "stat columns must stay NULL without --locate")
+
+    scenarios.append(Scenario(
+        name="sum_without_locate_leaves_stat_null",
+        description="--sum alone does not populate the locate/stat columns.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        argv=["--database", "{db}", "--sum"],
+        check=check_sum_no_stat,
+    ))
+
+    # 15. --locate captures stat columns (size here, as the easy-to-verify one).
+    def check_locate_stat(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1, f"expected 1 row, got {len(rows)}")
+        if rows:
+            actual_size = (root / "data.bin").stat().st_size
+            k.expect(rows[0].size == actual_size,
+                     f"expected size {actual_size}, got {rows[0].size!r}")
+            k.expect(rows[0].digest == s.actual_digest,
+                     "--sum --locate together should still compute correctly")
+
+    scenarios.append(Scenario(
+        name="locate_captures_stat_columns",
+        description="--locate stats every file and writes size/mode/etc. to the db.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        argv=["--database", "{db}", "--sum", "--locate"],
+        check=check_locate_stat,
+    ))
+
+    # 16. --locate implies --import: without --sum or --force, it must not
+    #     compute -- prove it the same way as import_copies_without_computing,
+    #     with a deliberately wrong prestamped digest that must survive verbatim
+    #     -- while still capturing stat columns.
+    def check_locate_implies_import(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1, f"expected 1 row, got {len(rows)}")
+        if rows:
+            k.expect(rows[0].digest != s.actual_digest,
+                     "--locate must not compute; the wrong stored digest should survive")
+            k.expect(rows[0].digest == s.stored_digest,
+                     "db digest should equal the xattr digest verbatim")
+            actual_size = (root / "data.bin").stat().st_size
+            k.expect(rows[0].size == actual_size,
+                     f"expected size {actual_size}, got {rows[0].size!r}")
+        k.expect(not s.digest_matches_content, "--locate must not rewrite the xattr")
+
+    scenarios.append(Scenario(
+        name="locate_without_sum_imports_and_stats",
+        description="--locate alone propagates existing metadata and stats, without computing.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("wrong-digest"))]),
+        argv=["--database", "{db}", "--locate"],
+        check=check_locate_implies_import,
+    ))
+
+    # 17. A row written by a plain --sum run (stat columns NULL) gets its stat
+    #     columns filled by a later --locate-only run, without disturbing the
+    #     digest already mirrored -- the COALESCE-on-stat-less-update contract.
+    def check_locate_fills_existing_row(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        rows = oracle.read_db(_db_for(root))
+        k.expect(len(rows) == 1,
+                 f"--locate re-scan should update the row in place, got {len(rows)}")
+        if rows:
+            k.expect(rows[0].digest == s.actual_digest,
+                     "digest from the earlier --sum run must survive untouched")
+            actual_size = (root / "data.bin").stat().st_size
+            k.expect(rows[0].size == actual_size,
+                     f"expected size {actual_size}, got {rows[0].size!r}")
+
+    scenarios.append(Scenario(
+        name="locate_fills_stat_on_existing_row",
+        description="--locate backfills stat columns on a row an earlier --sum run created.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        extra_runs=[["--database", "{db}", "--sum"]],   # row exists, stat columns NULL
+        argv=["--database", "{db}", "--locate"],         # backfill stat, keep the digest
+        check=check_locate_fills_existing_row,
+    ))
+
+    return scenarios

@@ -43,9 +43,13 @@ attribute is absent or unreadable;
 .IP \(bu 3
 the stored modification time is older than the file's current mtime;
 .IP \(bu 3
-the stored schema version has a lower major number than the running software;
-.IP \(bu 3
-a requested digest algorithm is absent from the stored metadata.
+the stored schema version has a lower major number than the running software.
+.PP
+Freshness is algorithm-agnostic: a file with any current digest, regardless of
+which algorithm produced it, counts as up to date. A stored digest is never
+recomputed merely because a different algorithm is now preferred; when a
+re-hash does happen for one of the reasons above, it replaces the file's
+single stored digest rather than keeping the old one alongside it.
 .SH OPTIONS
 .TP
 .BR \-n ", " \-\-dry\-run
@@ -61,7 +65,8 @@ to also suppress error messages on standard error. Mutually exclusive with
 .BR \-\-verbose .
 .TP
 .BR \-v ", " \-\-verbose
-Explain the decision made for each file, including skips. Repeat
+Explain the decision made for each file, including skips. Without this
+option, each file touched is announced by its bare path alone. Repeat
 .RB ( \-vv )
 for deep internal detail intended for debugging. Mutually exclusive with
 .BR \-\-quiet .
@@ -71,13 +76,31 @@ Show a live within-file progress indicator for large files. If it appears
 together with
 .BR \-q ,
 whichever option appears last on the command line wins, and a warning is
-printed to standard error.
+printed to standard error. The indicator's line shows the file's size, the
+current hashing rate, a bar, the percentage complete, elapsed time, and an
+ETA, e.g.:
+.RS
+.EX
+99.3GiB   40.1MiB/s  [===============>     ]  84%   0:05:12  ETA 58s
+.EE
+.RE
+.TP
+.B \-\-si
+Display
+.B \-\-progress
+sizes and rates using decimal (SI, powers-of-1000:
+.BR kB / MB / GB )
+units instead of the default binary (powers-of-1024:
+.BR KiB / MiB / GiB )
+units.
 .TP
 .BR \-f ", " \-\-force
 Re-hash every file unconditionally, ignoring any existing metadata. Cannot be
 combined with
-.BR \-\-dry\-run ", " \-\-import ", or " \-\-verify .
-This option does
+.BR \-\-dry\-run " or " \-\-verify .
+Combined with
+.BR \-\-import " or " \-\-locate ,
+overrides their default refusal to compute (see below). This option does
 .I not
 override
 .B @sumtag\-ignore
@@ -86,8 +109,7 @@ markers; use
 for that.
 .TP
 .BI \-\-database " VALUE"
-Mirror each file's metadata into a database in addition to the extended
-attribute, which remains the source of truth.
+Name a database to act on.
 .I VALUE
 is a SQLite file path, or a
 .RI scheme ://
@@ -99,15 +121,50 @@ any other value, including one that merely contains a colon, is a SQLite file
 path. Only SQLite is implemented; a DSN is recognised and rejected as not yet
 supported. Database paths are stored relative to the file's mount point so
 they survive remounting at a different location.
+.B \-\-database
+takes no action by itself; it requires at least one of
+.BR \-\-sum ", " \-\-import ", or " \-\-locate
+to say what to do with it.
+.TP
+.B \-\-sum
+Re-hash each file per the normal mtime-based decision (see
+.B RE\-HASHING )
+and mirror the result, in addition to the extended attribute, into the
+database named by
+.BR \-\-database ,
+which this option requires.
 .TP
 .B \-\-import
-Do not compute any checksum; only copy metadata already present in each file's
-extended attribute into the database. Requires
+Do not compute any checksum by default; only copy metadata already present in
+each file's extended attribute into the database. Requires
 .BR \-\-database .
 Files lacking usable metadata are skipped and reported. Useful for populating
-a database from an archive that was hashed on a previous run. Cannot be
-combined with
-.BR \-\-force " or " \-\-verify .
+a database from an archive that was hashed on a previous run. Combined with
+.BR \-\-force ,
+computes and mirrors every file instead of only propagating what already
+exists. Combined with
+.BR \-\-sum ,
+is redundant (the normal decision already computes and mirrors) but not an
+error. Cannot be combined with
+.BR \-\-verify .
+.TP
+.B \-\-locate
+Stat every file visited and write filesystem metadata (size, permissions,
+ownership, link count, device, and timestamps) to the database, regardless of
+whether xattr work was done. Implies
+.BR \-\-import :
+existing extended-attribute metadata is propagated as well, so
+.B \-\-locate
+alone does everything
+.B \-\-import
+alone would, plus stat columns. Requires
+.BR \-\-database .
+Combined with
+.BR \-\-force ,
+computes checksums for every file too, the same override
+.B \-\-import
+accepts. Useful as a periodic filesystem inventory pass (analogous to
+.BR updatedb ).
 .TP
 .B \-\-verify
 Read-only integrity check: recompute each file's checksum and compare it to the
@@ -116,12 +173,44 @@ mismatch. A mismatch while the stored modification time still matches the
 file's mtime indicates silent corruption; a mismatch accompanied by a newer
 mtime indicates an ordinary modification whose stamp is merely stale. Files
 with no usable metadata are reported as unverifiable. Cannot be combined with
-.BR \-\-database ", " \-\-force ", or " \-\-import ;
+.BR \-\-database " (nor " \-\-sum ", " \-\-import ", or " \-\-locate ", which all require it), or " \-\-force ";"
 combining with
 .B \-\-dry\-run
 is a redundant no-op and is permitted. See
 .B EXIT STATUS
 below.
+.TP
+.B \-\-remove
+Remove the
+.B user.sumtag
+xattr from every file in the tree. A testing/reset utility, not a
+data-integrity primitive: no mtime comparison, no hashing, just an
+unconditional delete of whatever attribute happens to be present. Files with
+no attribute are left alone. Combined with
+.BR \-\-dry\-run ,
+previews which files would lose their stamp without removing anything. Cannot
+be combined with
+.BR \-\-database " (nor " \-\-sum ", " \-\-import ", or " \-\-locate ", which all require it), " \-\-verify ", or " \-\-force .
+.TP
+.B \-\-prescan
+Walk the tree once up front to count the files that will be checksummed and
+their total size, then prefix each hash/verify announcement with an
+.IR nnn / mmm
+file counter and a bytes-so-far/total counter, e.g.:
+.RS
+.EX
+042/137  118.2MiB/4.2GiB  hash /backup/vault/photo0042.dng (reason)
+.EE
+.RE
+The counted set mirrors whichever mode is running: for the normal hash/stamp
+pass it is the files the re-hash decision (or
+.BR \-\-force )
+will actually hash; for
+.BR \-\-verify
+it is every file with a usable stored digest. The prescan pass is a
+prediction from a separate walk, not a guarantee \(em counts can drift if the
+tree changes between the two passes. Cannot be combined with
+.BR \-\-remove .
 .TP
 .B \-\-no\-ignore
 Disregard all
@@ -193,13 +282,20 @@ sumtag \-n /data
 Stamp and also mirror into a SQLite database:
 .PP
 .EX
-sumtag \-\-database /var/lib/sumtag.sqlite /data
+sumtag \-\-database /var/lib/sumtag.sqlite \-\-sum /data
 .EE
 .PP
 Import existing metadata into a database without re-reading files:
 .PP
 .EX
 sumtag \-\-database /var/lib/sumtag.sqlite \-\-import /data
+.EE
+.PP
+Take a filesystem inventory pass, capturing stat metadata alongside any
+existing checksums:
+.PP
+.EX
+sumtag \-\-database /var/lib/sumtag.sqlite \-\-locate /data
 .EE
 .PP
 Verify an archive against its stored checksums:
