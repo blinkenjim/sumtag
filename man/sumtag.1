@@ -188,6 +188,26 @@ previews which files would lose their stamp without removing anything. Cannot
 be combined with
 .BR \-\-database " (nor " \-\-sum ", " \-\-import ", or " \-\-locate ", which all require it), " \-\-verify ", or " \-\-force .
 .TP
+.B \-\-prescan
+Walk the tree once up front to count the files that will be checksummed and
+their total size, then prefix each hash/verify announcement with an
+.IR nnn / mmm
+file counter and a bytes-so-far/total counter, e.g.:
+.RS
+.EX
+042/137  118.2MiB/4.2GiB  hash /backup/vault/photo0042.dng (reason)
+.EE
+.RE
+The counted set mirrors whichever mode is running: for the normal hash/stamp
+pass it is the files the re-hash decision (or
+.BR \-\-force )
+will actually hash; for
+.BR \-\-verify
+it is every file with a usable stored digest. The prescan pass is a
+prediction from a separate walk, not a guarantee \(em counts can drift if the
+tree changes between the two passes. Cannot be combined with
+.BR \-\-remove .
+.TP
 .B \-\-no\-ignore
 Disregard all
 .B @sumtag\-ignore

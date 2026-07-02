@@ -20,7 +20,11 @@ XATTR_NAME = "user.sumtag"
 VERSION = __version__
 
 #: Digest algorithm key in the ``digests`` map and the DB ``algo`` column.
-ALGO = "xxh3"
+#: The single switch point for which algorithm sumtag computes -- see
+#: ``hashing._HASHERS`` for the set of algorithms actually implemented.
+#: A real ``--digest`` CLI selector is future work; today this is a
+#: code-level constant, not a flag.
+ALGO = "md5"
 
 
 def major_of(version: str) -> int:

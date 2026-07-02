@@ -29,15 +29,16 @@ class _Reporter:
         if self._quiet == 0:
             print(msg)
 
-    def announce(self, path: str, verbose_msg: str) -> None:
+    def announce(self, path: str, verbose_msg: str, prefix: str = "") -> None:
         """A routine per-file announcement (CLAUDE.md "Status lines").
 
         Bare path without -v; the full action/reason form with -v. Unlike
         info(), the caller's message is only shown at -v -- by default this
-        prints nothing but the path.
+        prints nothing but the path. ``prefix`` is --prescan's nnn/mmm and
+        bytes-so-far/total counter, prepended ahead of either form.
         """
         if self._quiet == 0:
-            print(verbose_msg if self._verbose >= 1 else path)
+            print(prefix + (verbose_msg if self._verbose >= 1 else path))
 
     def detail(self, msg: str) -> None:      # only with -v
         if self._verbose >= 1 and self._quiet == 0:
@@ -83,7 +84,8 @@ def run(args) -> int:
     roots = args.directories or ["."]
 
     if args.verify:
-        return _verify(roots, args, rep)
+        prescan = _prescan_verify(roots, args) if args.prescan else None
+        return _verify(roots, args, rep, prescan)
 
     if args.remove:
         return _remove(roots, args, rep)
@@ -99,11 +101,83 @@ def run(args) -> int:
             rep.error(f"sumtag: {e}")
             return EXIT_ERRORS
 
+    prescan = _prescan_stamp(roots, args) if args.prescan else None
+
     try:
-        return _stamp(roots, args, rep, store)
+        return _stamp(roots, args, rep, store, prescan)
     finally:
         if store is not None:
             store.close()
+
+
+def _hash_decision(meta, live: str, args, current_major: int,
+                    use_standard_decision: bool) -> tuple[bool, str]:
+    """Whether a file gets (re-)hashed, and why -- the one branch _stamp()
+    and --prescan's counting pass must agree on bit-for-bit, or the nnn/mmm
+    counter shown during the real pass won't line up with what --prescan
+    predicted.
+    """
+    if use_standard_decision:
+        return decide.should_rehash(meta, live, args.force, [schema.ALGO], current_major)
+    rehash = args.force
+    reason = "forced" if args.force else "not computing (--import/--locate only)"
+    return rehash, reason
+
+
+def _prescan_stamp(roots, args) -> tuple[int, int]:
+    """Predict how many files the real pass will hash, and their total size,
+    before it begins (--prescan). Mirrors _stamp()'s own decision exactly
+    (via _hash_decision) so the nnn/mmm and byte counters it prints line up.
+
+    Traversal warnings (e.g. a scan root's own @sumtag-ignore) are suppressed
+    here -- the real pass reports them -- so nothing gets warned about twice.
+    Errors are swallowed the same way: the real pass will hit and report them.
+    """
+    current_major = schema.major_of(schema.VERSION)
+    use_standard_decision = args.sum or not args.database
+    count = 0
+    total_bytes = 0
+    for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
+                                on_warn=lambda msg: None):
+        try:
+            st = os.stat(path)
+            live = schema.iso_utc_ns(st.st_mtime_ns)
+            meta = _read_meta(path)
+            rehash, _ = _hash_decision(meta, live, args, current_major, use_standard_decision)
+            if rehash:
+                count += 1
+                total_bytes += st.st_size
+        except OSError:
+            pass
+    return count, total_bytes
+
+
+def _prescan_verify(roots, args) -> tuple[int, int]:
+    """Predict how many files --verify will actually read, and their total
+    size (--prescan): every file with a usable stored digest -- the same
+    set that won't come back UNVERIFIABLE.
+    """
+    count = 0
+    total_bytes = 0
+    for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
+                                on_warn=lambda msg: None):
+        try:
+            meta = _read_meta(path)
+            if meta is not None and meta.get("digests"):
+                count += 1
+                total_bytes += os.stat(path).st_size
+        except OSError:
+            pass
+    return count, total_bytes
+
+
+def _prescan_prefix(index: int, total_count: int, bytes_so_far: int,
+                    total_bytes: int, si: bool) -> str:
+    """Render --prescan's "nnn/mmm  so-far/total  " counter prefix."""
+    width = len(str(total_count)) if total_count else 1
+    so_far_h = progress_mod.human_size(bytes_so_far, si)
+    total_h = progress_mod.human_size(total_bytes, si)
+    return f"{index:0{width}d}/{total_count}  {so_far_h}/{total_h}  "
 
 
 def _mirror(store, path: str, meta: dict, inode: int,
@@ -117,7 +191,7 @@ def _mirror(store, path: str, meta: dict, inode: int,
                           stat=stat)
 
 
-def _stamp(roots, args, rep: _Reporter, store) -> int:
+def _stamp(roots, args, rep: _Reporter, store, prescan: tuple[int, int] | None = None) -> int:
     """Walk the tree, (re-)hashing and/or mirroring per the given flags.
 
     Without --database, or with --sum, files are (re-)hashed per the normal
@@ -127,12 +201,19 @@ def _stamp(roots, args, rep: _Reporter, store) -> int:
     unless --force overrides that refusal. --locate implies --import: existing
     metadata is mirrored either way; --locate additionally captures stat
     columns and stats files that have no metadata to mirror at all.
+
+    ``prescan``, when --prescan supplied one, is the (count, total_bytes) of
+    files this pass is expected to hash; it drives the nnn/mmm and
+    bytes-so-far/total counter prepended to each hash announcement.
     """
     run_started = schema.now_iso()
     current_major = schema.major_of(schema.VERSION)
     exit_code = EXIT_OK
     need_stat = args.locate
-    use_standard_decision = store is None or args.sum
+    use_standard_decision = args.sum or not args.database
+    hashed_index = 0
+    bytes_so_far = 0
+    prescan_count, prescan_bytes = prescan if prescan is not None else (0, 0)
 
     for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
                                 on_warn=rep.error):
@@ -141,24 +222,27 @@ def _stamp(roots, args, rep: _Reporter, store) -> int:
             live = schema.iso_utc_ns(st.st_mtime_ns)
             meta = _read_meta(path)
 
-            if use_standard_decision:
-                rehash, reason = decide.should_rehash(
-                    meta, live, args.force, [schema.ALGO], current_major)
-            else:
-                rehash = args.force
-                reason = "forced" if args.force else "not computing (--import/--locate only)"
+            rehash, reason = _hash_decision(meta, live, args, current_major,
+                                            use_standard_decision)
 
             if rehash:
+                prefix = ""
+                if prescan is not None:
+                    hashed_index += 1
+                    prefix = _prescan_prefix(hashed_index, prescan_count,
+                                            bytes_so_far, prescan_bytes, args.si)
                 if args.dry_run:
-                    rep.announce(path, f"would hash {path} ({reason})")
+                    rep.announce(path, f"would hash {path} ({reason})", prefix)
                 else:
-                    rep.announce(path, f"hash {path} ({reason})")
+                    rep.announce(path, f"hash {path} ({reason})", prefix)
                     ind = progress_mod.make(st.st_size, args.progress, args.si)
                     digest = hashing.hash_file(path, progress=ind)
                     if ind is not None:
                         ind.finish()
                     meta = schema.build_meta({schema.ALGO: digest}, live, run_started)
                     xattr.set(path, schema.XATTR_NAME, schema.dumps(meta))
+                if prescan is not None:
+                    bytes_so_far += st.st_size
             elif meta is not None and meta.get("digests"):
                 if use_standard_decision:
                     rep.detail(f"skip   {path} ({reason})")
@@ -187,9 +271,12 @@ def _stamp(roots, args, rep: _Reporter, store) -> int:
     return exit_code
 
 
-def _verify(roots, args, rep: _Reporter) -> int:
+def _verify(roots, args, rep: _Reporter, prescan: tuple[int, int] | None = None) -> int:
     any_corruption = False
     any_error = False
+    verify_index = 0
+    bytes_so_far = 0
+    prescan_count, prescan_bytes = prescan if prescan is not None else (0, 0)
 
     for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
                                 on_warn=rep.error):
@@ -203,13 +290,20 @@ def _verify(roots, args, rep: _Reporter) -> int:
                 any_error = True  # the check could not be completed for this file
                 continue
 
-            rep.announce(path, f"verify {path}")
+            prefix = ""
+            if prescan is not None:
+                verify_index += 1
+                prefix = _prescan_prefix(verify_index, prescan_count,
+                                        bytes_so_far, prescan_bytes, args.si)
+            rep.announce(path, f"verify {path}", prefix)
             computed = {}
             for algo in meta["digests"]:
                 ind = progress_mod.make(st.st_size, args.progress, args.si)
                 computed[algo] = hashing.hash_file(path, progress=ind)
                 if ind is not None:
                     ind.finish()
+            if prescan is not None:
+                bytes_so_far += st.st_size
             outcome = decide.classify_verify(meta, live, computed)
 
             if outcome == decide.CORRUPTION:

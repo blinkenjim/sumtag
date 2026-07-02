@@ -318,12 +318,15 @@ With no directory arguments, cwd is processed. Explicit paths override that defa
 | `--locate` | | bool | Stat every file visited and write the `os.stat()` metadata to the database, regardless of whether xattr work was done; implies `--import`. Requires `--database`. Useful as a periodic filesystem inventory pass (analogous to `updatedb`). |
 | `--si` | | bool | Display sizes and rates in `--progress` using decimal (SI, powers-of-1000: `kB`/`MB`/`GB`) units instead of the default binary (powers-of-1024: `KiB`/`MiB`/`GiB`) units. |
 | `--remove` | | bool | Remove the `user.sumtag` xattr from every file in the tree (see Removing stamps). A testing/reset utility, not a data-integrity primitive. Composes with `-n` to preview. |
+| `--prescan` | | bool | Walk the tree once before the real pass to count the files that will be checksummed and their total size, then prefix each hash/verify announcement with an nnn/mmm file counter and a bytes-so-far/total counter (see `--prescan` below). Cannot be combined with `--remove`. |
 
-`-q` and `-v` together are an error. `--force` and `--dry-run` together are an error. `--sum`, `--import`, and `--locate` are parallel, combinable actions performed on `--database` (see Database storage); each requires `--database`, and `--database` requires at least one of them. `--force` and `--import` together are **allowed**: `--import`'s refusal to compute is a default, not a hard restriction, and `--force` is the flag whose whole job is overriding defaults about what gets (re-)computed — so `--force --import` re-hashes every file and mirrors the result. The same override applies to `--force --locate`, since `--locate` implies `--import`. `--verify` conflicts with `--database` (and so `--sum`, `--import`, `--locate`) and `--force` (see Verification); `--verify -n` is a redundant no-op and is allowed. `--remove` conflicts with `--database` (and so `--sum`, `--import`, `--locate`), `--verify`, and `--force` — for the same reason as `--verify`, it is its own standalone mode, and there is no re-hash decision for `--force` to override; `--remove -n` is allowed and is the way to preview it. `--progress` and `-q` conflict: whichever appears later on the command line wins, with a warning to stderr. `--force` does **not** override `@sumtag-ignore` markers (see Ignore markers); use `--no-ignore` to process exempted directories.
+`-q` and `-v` together are an error. `--force` and `--dry-run` together are an error. `--sum`, `--import`, and `--locate` are parallel, combinable actions performed on `--database` (see Database storage); each requires `--database`, and `--database` requires at least one of them. `--force` and `--import` together are **allowed**: `--import`'s refusal to compute is a default, not a hard restriction, and `--force` is the flag whose whole job is overriding defaults about what gets (re-)computed — so `--force --import` re-hashes every file and mirrors the result. The same override applies to `--force --locate`, since `--locate` implies `--import`. `--verify` conflicts with `--database` (and so `--sum`, `--import`, `--locate`) and `--force` (see Verification); `--verify -n` is a redundant no-op and is allowed. `--remove` conflicts with `--database` (and so `--sum`, `--import`, `--locate`), `--verify`, and `--force` — for the same reason as `--verify`, it is its own standalone mode, and there is no re-hash decision for `--force` to override; `--remove -n` is allowed and is the way to preview it. `--prescan` conflicts with `--remove` for the same reason: `--remove` never computes anything, so there is nothing for `--prescan` to count. `--progress` and `-q` conflict: whichever appears later on the command line wins, with a warning to stderr. `--force` does **not** override `@sumtag-ignore` markers (see Ignore markers); use `--no-ignore` to process exempted directories.
 
 ### Status lines
 
 Sumtag's default (non-quiet) output is an *announcement*, not a completion report: for any file about to be checksummed, a line prints **before** the read begins. **Without `-v`, that line is the bare path and nothing else** — no verb, no reason, just the path, so `sumtag --sum` over a large tree stays clean and skimmable. **With `-v`**, the same announcement expands to the full form — `hash <path> (<reason>)` for a stamp, `verify <path>` for `--verify`, `import <path>` for a propagated import, `would hash <path> (<reason>)` under `--dry-run` — using present/imperative verbs, not past tense (`hash`/`import`, not `hashed`/`imported`). This bare-path/`-v` split applies uniformly to every routine per-file announcement (stamp, dry-run preview, import, and the no-usable-metadata report under `--import`/`--locate`); it does **not** apply to `--progress`, which is unaffected by `-v` and appears regardless, nor to the deviation lines below. The path being on screen before the read begins is also what makes `--progress` legible: it's already there by the time a slow file's live bar appears at the 5-second mark, rather than the bar being the first anyone hears of that file.
+
+With `--prescan`, the hash/`would hash`/`verify` announcement (bare-path or `-v` form alike) additionally gets an nnn/mmm and bytes-so-far/total counter prepended — see `--prescan` below. It does not touch `import`, `skip`, or the no-usable-metadata report; those aren't "the line before summing a file" in the first place.
 
 A clean outcome earns no further line — silence means nothing bad happened. `--verify`'s successful case in particular prints nothing beyond its announcement (no `ok` line); the announcement already was the record. Only a *deviation* from clean earns a second line, and these are **unconditional — shown with their label regardless of `-v`**, since they are alarms, not the routine "why was this touched" detail that `-v` exists to add: `CORRUPT <path>` (mismatch), `stale <path> (modified since hash; restamp needed)` (legitimately edited, not corrupt — surfaced unconditionally, like `rsync` noting a file changed mid-transfer), `unverifiable <path>` (no usable xattr to check against; replaces the announcement outright since no read is even attempted), or an error via the normal error channel (`sumtag: <path>: <error>`; the file is skipped and the run continues).
 
@@ -366,6 +369,40 @@ Fields, left to right:
 
 At 80 columns, every field except the bar has a fixed width, so the bar absorbs whatever width remains (28 characters at 80 columns given the widths above) and is the only field whose width varies. This matters for a future enhancement: handling `SIGWINCH` to resize the bar to the terminal's current width without touching any other field's layout or triggering jitter in the numbers.
 
+### `--prescan`
+
+On a very large tree, the default output gives no sense of *how far along* a run is — files stream by with no indication of what fraction of the work is done. `--prescan` fixes that by walking the tree once, up front, purely to count: how many files the run will actually checksum, and their total size. The real pass then runs exactly as it always has, except each hash/verify announcement gains a counter prefix:
+
+```
+nnn/mmm  bytes-so-far/bytes-total  <the usual announcement>
+```
+
+Example (`-v`, mid-run):
+
+```
+042/137  118.2MiB/4.2GiB  hash /backup/vault/photo0042.dng (file modified since last hash)
+```
+
+Or without `-v` (bare path, prefix still shown):
+
+```
+042/137  118.2MiB/4.2GiB  /backup/vault/photo0042.dng
+```
+
+- **nnn** is this file's ordinal position among the files being checksummed this run, zero-padded to the width of **mmm** (e.g. `007/137`, not `7/137`) so the column stays aligned as the count climbs.
+- **mmm** is the total count `--prescan` found up front.
+- **bytes-so-far** is the sum of the sizes of files *already completed* before this announcement (so it reads `0B` on the very first file) — not a live in-file counter like `--progress`; this line prints once per file, before that file's read begins.
+- **bytes-total** is the total size `--prescan` found up front.
+- Both byte figures are human-readable, honoring `--si` exactly like `--progress`'s size field.
+
+**What counts as "will be checksummed" mirrors whichever mode is running:**
+
+- For the normal hash/stamp pass (no `--database`, or `--sum`/`--import`/`--locate`), it is exactly the set of files the mtime-based re-hash decision (or `--force`) will cause to be hashed — the same files that would otherwise print `hash`/`would hash`. Files that will be skipped, imported without computing, or reported as having no metadata are not counted and do not get a prefix (CLAUDE.md "Status lines" — that line was never "the line before summing a file" to begin with).
+- For `--verify`, it is every file with a usable stored digest — the same set that will be read and recomputed, as opposed to reported `unverifiable` outright.
+- `--remove` computes nothing, so `--prescan` has nothing to count; the two are a CLI error together (see Flags).
+
+**Cost and a known limitation:** the prescan walk duplicates the traversal and the xattr/stat reads the real pass is about to do anyway — a deliberate trade of one extra cheap (metadata-only, no file content read) pass for a progress indication that would otherwise be impossible to give up front. Because it is a separate pass, its counts are a prediction, not a guarantee: if the tree changes between the prescan and the real pass (a file is added, removed, or its own re-hash decision flips), `nnn`/`mmm` can drift slightly out of sync with what the real pass actually does. This is a display aid, not authoritative accounting — nothing about hashing, stamping, or exit codes depends on it. The prescan pass suppresses the traversal warnings the real pass already prints (e.g. a scan root's own `@sumtag-ignore`), so nothing is warned about twice.
+
 `-q` and `-v` use `action='count'` in argparse, so `-vv` and `-v -v` are equivalent.
 
-Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--locate`, `--si`, `--remove`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.
+Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--locate`, `--si`, `--remove`, `--prescan`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.

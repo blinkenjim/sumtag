@@ -59,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remove", action="store_true",
                         help="remove the user.sumtag xattr from every file in "
                              "the tree (a testing/reset utility)")
+    parser.add_argument("--prescan", action="store_true",
+                        help="scan the tree first to count files/bytes to be "
+                             "checksummed, then prefix each announcement with "
+                             "an nnn/mmm and bytes-so-far/total counter")
     parser.add_argument("--no-ignore", action="store_true",
                         help="disregard @sumtag-ignore marker files")
     parser.add_argument("--locate", action="store_true",
@@ -108,6 +112,9 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
             parser.error("--remove cannot be combined with --verify")
         if args.force:
             parser.error("--remove cannot be combined with --force")
+    if args.prescan and args.remove:
+        parser.error("--prescan cannot be combined with --remove "
+                     "(--remove never computes anything to prescan)")
     # --progress vs -q is resolved by command-line order, not rejected here --
     # see _resolve_progress_quiet, which needs the raw argv argparse discards.
 

@@ -53,7 +53,7 @@ _BINARY_UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
 _SI_UNITS = ("B", "kB", "MB", "GB", "TB", "PB")
 
 
-def _human(n: float, si: bool) -> str:
+def human_size(n: float, si: bool) -> str:
     """Render a byte count (or byte rate) human-readably.
 
     Binary (powers-of-1024) by default; decimal (powers-of-1000) with --si
@@ -136,8 +136,8 @@ class Indicator:
         rate = read / elapsed if elapsed > 0 else 0.0
         frac = (read / self._total) if self._total else 1.0
 
-        size_str = _human(self._total, self._si)
-        rate_str = _human(rate, self._si) + "/s"
+        size_str = human_size(self._total, self._si)
+        rate_str = human_size(rate, self._si) + "/s"
         bar = _render_bar(frac, _BAR_WIDTH)
         elapsed_str = _format_elapsed(elapsed)
         eta_str = _format_eta((self._total - read) / rate) if rate > 0 else "--"
