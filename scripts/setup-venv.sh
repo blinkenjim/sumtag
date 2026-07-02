@@ -22,6 +22,10 @@ rm -rf .venv
 # can target another interpreter via --python (pip 22.3+).
 if python3 -m venv .venv >/dev/null 2>&1; then
     pip_cmd=(.venv/bin/pip)
+    # ensurepip bundles whatever pip shipped with the interpreter, which can
+    # predate PEP 660 (editable installs of pyproject.toml-only projects need
+    # pip >= 21.3; macOS python3 3.9 bundles 21.2). Upgrade before installing.
+    "${pip_cmd[@]}" install --quiet --upgrade pip
 else
     echo "setup-venv: ensurepip unavailable; using system pip3 --python" >&2
     rm -rf .venv
