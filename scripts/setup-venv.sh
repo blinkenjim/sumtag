@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-# (Re)build the project virtualenv for THIS machine and keep it out of Dropbox.
+# (Re)build the project virtualenv for THIS machine.
 #
-# The repo lives in a Dropbox-synced tree, and a venv is machine-specific:
-# interpreter symlinks and compiled wheels built on one OS are garbage on
-# another, so a synced .venv is broken everywhere except the machine that
-# made it. This script rebuilds .venv with the local python3 and marks it
-# with Dropbox's `com.dropbox.ignored` xattr so it never syncs.
+# A venv is machine-specific -- interpreter symlinks and compiled wheels
+# built on one OS don't work on another -- so each machine (or checkout)
+# keeps its own .venv, which .gitignore keeps out of version control. This
+# script rebuilds it with the local python3 and does the editable install.
 #
 # Run it once per machine, from anywhere:
 #     scripts/setup-venv.sh
-# and again any time .venv shows up broken (which means the ignore xattr
-# was lost -- this script reapplies it).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -33,15 +30,6 @@ else
     pip_cmd=(pip3 --python .venv/bin/python)
 fi
 
-# Mark the venv Dropbox-ignored *before* installing anything, so the sync
-# client never starts uploading site-packages. On macOS the attribute name
-# is used as-is; on Linux it must live in the user. namespace.
-case "$(uname)" in
-    Darwin) xattr -w com.dropbox.ignored 1 .venv ;;
-    *)      .venv/bin/python -c \
-              'import os; os.setxattr(".venv", "user.com.dropbox.ignored", b"1")' ;;
-esac
-
 "${pip_cmd[@]}" install -e .
 
-echo "setup-venv: OK -- $(.venv/bin/python --version), .venv marked Dropbox-ignored"
+echo "setup-venv: OK -- $(.venv/bin/python --version)"
