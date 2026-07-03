@@ -4,6 +4,7 @@ sumtag \- stamp files with an XXH3 checksum and metadata for corruption and dupl
 .SH SYNOPSIS
 .B sumtag
 .RI [ OPTIONS ]
+.I DIRECTORY
 .RI [ DIRECTORY .\|.\|.]
 .SH DESCRIPTION
 .B sumtag
@@ -18,12 +19,13 @@ left to other tools, with one exception built in here: the single-pass
 integrity check offered by
 .BR \-\-verify .
 .PP
-If no
+At least one
 .I DIRECTORY
-is given, the current working directory is scanned. Explicit paths replace
-that default; pass
+is required; there is no current-directory default. Any operation that scans
+a directory requires an explicit directory argument, so that a recursive
+operation is never aimed at the working directory by omission. Pass
 .B .
-explicitly to include the current directory alongside others.
+explicitly to scan the current directory.
 .PP
 For each file, sumtag reads any existing
 .B user.sumtag
@@ -264,7 +266,7 @@ Marker file that exempts its directory and subtree (see IGNORE MARKERS).
 Scan the current directory:
 .PP
 .EX
-sumtag
+sumtag .
 .EE
 .PP
 Scan two archives:

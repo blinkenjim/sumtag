@@ -26,8 +26,9 @@ def build_parser() -> argparse.ArgumentParser:
                     "the user.sumtag extended attribute; optionally mirror to a "
                     "database and verify against stored checksums.",
     )
-    parser.add_argument("directories", nargs="*", metavar="DIRECTORY",
-                        help="directories to scan (default: current directory)")
+    parser.add_argument("directories", nargs="+", metavar="DIRECTORY",
+                        help="directories to scan (at least one is required; "
+                             "pass . for the current directory)")
 
     parser.add_argument("-n", "--dry-run", action="store_true",
                         help="report what would be done; write nothing")

@@ -81,7 +81,7 @@ def _read_meta(path: str) -> dict | None:
 def run(args) -> int:
     """Entry point from the CLI; dispatches to verify, import, or stamp."""
     rep = _Reporter(args)
-    roots = args.directories or ["."]
+    roots = args.directories
 
     if args.verify:
         prescan = _prescan_verify(roots, args) if args.prescan else None

@@ -5,7 +5,7 @@ NAME
        and duplicate detection
 
 SYNOPSIS
-       sumtag [OPTIONS] [DIRECTORY...]
+       sumtag [OPTIONS] DIRECTORY [DIRECTORY...]
 
 DESCRIPTION
        sumtag recursively scans each DIRECTORY, computes an XXH3 checksum of
@@ -16,9 +16,11 @@ DESCRIPTION
        tools, with one exception built in here: the single-pass integrity
        check offered by --verify.
 
-       If no DIRECTORY is given, the current working directory is scanned.
-       Explicit paths replace that default; pass .  explicitly to include the
-       current directory alongside others.
+       At least one DIRECTORY is required; there is no current-directory
+       default. Any operation that scans a directory requires an explicit
+       directory argument, so that a recursive operation is never aimed at the
+       working directory by omission. Pass .  explicitly to scan the current
+       directory.
 
        For each file, sumtag reads any existing user.sumtag attribute and
        compares the recorded modification time to the file's current mtime. If
@@ -205,7 +207,7 @@ FILES
 EXAMPLES
        Scan the current directory:
 
-       sumtag
+       sumtag .
 
        Scan two archives:
 

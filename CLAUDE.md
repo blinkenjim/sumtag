@@ -84,7 +84,7 @@ A directory can be exempted from sumtag by placing a marker file named **`@sumta
 
 - **The marker beats `--force`.** `--force` governs *how* re-hash decisions are made for files that get visited; the marker governs *whether a subtree is visited at all*. A directory deliberately fenced off must not be clobbered just because `-f` was passed. The marker wins.
 - **`--no-ignore` is the intended escape hatch.** It disregards all `@sumtag-ignore` markers for the run, processing everything. This is how you override exemptions — not by weakening `--force`.
-- **A marker on an explicit scan root is honored, with a warning.** If a path passed on the command line (or cwd, when no paths are given) contains a top-level `@sumtag-ignore`, sumtag skips it like any other exempted directory but emits a warning to stderr, since silently doing nothing for a run the user explicitly requested would be confusing.
+- **A marker on an explicit scan root is honored, with a warning.** If a path passed on the command line contains a top-level `@sumtag-ignore`, sumtag skips it like any other exempted directory but emits a warning to stderr, since silently doing nothing for a run the user explicitly requested would be confusing.
 
 ## Database storage
 
@@ -293,20 +293,20 @@ sumtag = "sumtag.cli:main"
 The installed `sumtag` command is the primary form; `python3 -m sumtag` is equivalent and convenient during development.
 
 ```bash
-# Scan cwd
-sumtag
+# Scan the current directory
+sumtag .
 
 # Scan one or more directories
 sumtag /data /backup
 
-# Scan cwd plus another directory
+# Scan the current directory plus another directory
 sumtag . /data
 
 # Equivalent, from a source checkout (development)
 python3 -m sumtag /data /backup
 ```
 
-With no directory arguments, cwd is processed. Explicit paths override that default; to include cwd alongside other paths, pass `.` explicitly.
+At least one directory argument is required; there is no cwd default (decided 2026-07-03). The rule: any operation that scans a directory requires an explicit directory argument — this guards against firing a recursive operation (a bare `sumtag --remove` or `sumtag --sum`) at whatever directory you happen to be in by omission. Every current mode scans, so the rule applies to all of them; to scan the current directory, pass `.` explicitly.
 
 ## Flags
 
@@ -315,7 +315,7 @@ With no directory arguments, cwd is processed. Explicit paths override that defa
 | `--dry-run` | `-n` | bool | Scan and report what would be done; do not write any xattrs. Output is identical to a real run. |
 | `--quiet` | `-q` | count | `-q`: suppress normal output. `-qq`: also suppress errors (to stderr). |
 | `--verbose` | `-v` | count | `-v`: show reason for each decision (including skips). `-vv`: deep internals for debugging. |
-| `--progress` | | bool | Show a live within-file progress indicator, triggered once a single file's checksum has run for more than 5 seconds. User-friendly; distinct from verbose output. |
+| `--progress` | | bool | Show a live within-file progress indicator, triggered once a single file's checksum has run for more than 2 seconds. User-friendly; distinct from verbose output. |
 | `--force` | `-f` | bool | Re-hash every file unconditionally, ignoring any existing xattr metadata. |
 | `--database` | | str | Names the database to act on (SQLite path, or a `scheme://` DSN — only SQLite is implemented; DSNs are reserved for future backends). Takes no action by itself; requires at least one of `--sum`, `--import`, `--locate`. |
 | `--sum` | | bool | (Re-)hash per the normal mtime-based decision and mirror the result into `--database`. Requires `--database`. |
@@ -331,7 +331,7 @@ With no directory arguments, cwd is processed. Explicit paths override that defa
 
 ### Status lines
 
-Sumtag's default (non-quiet) output is an *announcement*, not a completion report: for any file about to be checksummed, a line prints **before** the read begins. **Without `-v`, that line is the bare path and nothing else** — no verb, no reason, just the path, so `sumtag --sum` over a large tree stays clean and skimmable. **With `-v`**, the same announcement expands to the full form — `hash <path> (<reason>)` for a stamp, `verify <path>` for `--verify`, `import <path>` for a propagated import, `would hash <path> (<reason>)` under `--dry-run` — using present/imperative verbs, not past tense (`hash`/`import`, not `hashed`/`imported`). This bare-path/`-v` split applies uniformly to every routine per-file announcement (stamp, dry-run preview, import, and the no-usable-metadata report under `--import`/`--locate`); it does **not** apply to `--progress`, which is unaffected by `-v` and appears regardless, nor to the deviation lines below. The path being on screen before the read begins is also what makes `--progress` legible: it's already there by the time a slow file's live bar appears at the 5-second mark, rather than the bar being the first anyone hears of that file.
+Sumtag's default (non-quiet) output is an *announcement*, not a completion report: for any file about to be checksummed, a line prints **before** the read begins. **Without `-v`, that line is the bare path and nothing else** — no verb, no reason, just the path, so `sumtag --sum` over a large tree stays clean and skimmable. **With `-v`**, the same announcement expands to the full form — `hash <path> (<reason>)` for a stamp, `verify <path>` for `--verify`, `import <path>` for a propagated import, `would hash <path> (<reason>)` under `--dry-run` — using present/imperative verbs, not past tense (`hash`/`import`, not `hashed`/`imported`). This bare-path/`-v` split applies uniformly to every routine per-file announcement (stamp, dry-run preview, import, and the no-usable-metadata report under `--import`/`--locate`); it does **not** apply to `--progress`, which is unaffected by `-v` and appears regardless, nor to the deviation lines below. The path being on screen before the read begins is also what makes `--progress` legible: it's already there by the time a slow file's live bar appears at the 2-second mark, rather than the bar being the first anyone hears of that file.
 
 With `--prescan`, the hash/`would hash`/`verify` announcement (bare-path or `-v` form alike) additionally gets an nnn/mmm and bytes-so-far/total counter prepended — see `--prescan` below. It does not touch `import`, `skip`, or the no-usable-metadata report; those aren't "the line before summing a file" in the first place.
 
@@ -341,7 +341,7 @@ A clean outcome earns no further line — silence means nothing bad happened. `-
 
 ### `--progress` indicator
 
-`--progress` is triggered by *time*, not file size: a modest file on a slow network mount is just as worth watching as a huge one on fast local storage, and a huge file that happens to finish quickly needs no indicator at all. Concretely: once a single file's checksum has been computing for more than 5 seconds, a live line appears on stderr — redrawn in place (`\r`, throttled to a few updates per second) — and is cleared the moment that file's hash completes. A file that finishes under the threshold shows nothing at all.
+`--progress` is triggered by *time*, not file size: a modest file on a slow network mount is just as worth watching as a huge one on fast local storage, and a huge file that happens to finish quickly needs no indicator at all. Concretely: once a single file's checksum has been computing for more than 2 seconds, a live line appears on stderr — redrawn in place (`\r`, throttled to a few updates per second) — and is cleared the moment that file's hash completes. A file that finishes under the threshold shows nothing at all.
 
 This is deliberately independent of `-v`/`--verbose`: verbosity is a durable, appended log of *why* each file got the decision it did (fine to redirect into a file), while `--progress` is an ephemeral, redrawn-in-place indicator of *how far through* the current file the run is (meaningless once redirected). Composing them is normal — with both given, the per-file announcement (`hash <path> (reason)` or `verify <path>`) prints first; then, if that file turns out to be slow, the live bar appears and redraws in place until the hash completes.
 

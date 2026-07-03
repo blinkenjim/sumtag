@@ -22,7 +22,7 @@ import time
 from typing import Optional
 
 #: Seconds a single file's checksum must run before the indicator appears.
-THRESHOLD_SECONDS = 5.0
+THRESHOLD_SECONDS = 2.0
 
 #: Minimum seconds between redraws once triggered, so a fast disk doesn't
 #: flood the terminal with a rewrite per 1 MiB chunk.
