@@ -20,6 +20,11 @@ or your platform's equivalent.
 Usage:
     python3 scripts/xxh3_crosscheck.py [-v] DIRECTORY...
 
+Output: one progress dot per file checked, so a long run visibly moves
+without drowning the lines that matter; any deviation (MISMATCH, NO-XATTR,
+MALFORMED, NO-XXH3, ERROR) breaks the dot row and gets its own labeled line.
+With -v, per-file check/match lines replace the dots entirely.
+
 Exit codes (mirrors sumtag --verify's convention):
     0   every file with a stored xxh3 digest matched
     1   one or more mismatches found
@@ -112,7 +117,8 @@ def main(argv: list[str] | None = None) -> int:
                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("directories", nargs="+", metavar="DIRECTORY")
     parser.add_argument("-v", "--verbose", action="store_true",
-                        help="also print a line for every matching file")
+                        help="print per-file check/match lines instead of "
+                             "progress dots")
     args = parser.parse_args(argv)
 
     if shutil.which("xxhsum") is None:
@@ -124,12 +130,30 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERRORS
 
     matched = mismatched = unusable = errors = 0
+    dots = 0  # progress dots printed since the last full line
+
+    def emit(msg: str, file=sys.stdout) -> None:
+        """Print a full line, first terminating any pending dot row so the
+        line starts at column 0 rather than mid-dots."""
+        nonlocal dots
+        if dots:
+            print(flush=True)
+            dots = 0
+        print(msg, file=file)
 
     for path in iter_files(args.directories):
+        # One dot per file as a progress pulse; deviations below break the
+        # row onto their own line so they stay obvious. -v prints per-file
+        # lines instead, which would make dots redundant noise.
+        if args.verbose:
+            emit(f"check      {path}")
+        else:
+            print(".", end="", flush=True)
+            dots += 1
         try:
             raw = read_xattr(path)
             if raw is None:
-                print(f"NO-XATTR   {path}")
+                emit(f"NO-XATTR   {path}")
                 unusable += 1
                 continue
 
@@ -137,13 +161,13 @@ def main(argv: list[str] | None = None) -> int:
                 meta = json.loads(raw.decode("utf-8"))
                 digests = meta["digests"]
             except (ValueError, KeyError, AttributeError):
-                print(f"MALFORMED  {path}")
+                emit(f"MALFORMED  {path}")
                 unusable += 1
                 continue
 
             stored = digests.get("xxh3")
             if stored is None:
-                print(f"NO-XXH3    {path} (digests present: {sorted(digests)})")
+                emit(f"NO-XXH3    {path} (digests present: {sorted(digests)})")
                 unusable += 1
                 continue
 
@@ -151,14 +175,16 @@ def main(argv: list[str] | None = None) -> int:
             if computed == stored.lower():
                 matched += 1
                 if args.verbose:
-                    print(f"match      {path}")
+                    emit(f"match      {path}")
             else:
-                print(f"MISMATCH   {path} (stored {stored}, computed {computed})")
+                emit(f"MISMATCH   {path} (stored {stored}, computed {computed})")
                 mismatched += 1
         except (OSError, RuntimeError, subprocess.CalledProcessError) as e:
-            print(f"ERROR      {path}: {e}", file=sys.stderr)
+            emit(f"ERROR      {path}: {e}", file=sys.stderr)
             errors += 1
 
+    if dots:
+        print(flush=True)
     total = matched + mismatched + unusable + errors
     print(f"\n{matched} matched, {mismatched} mismatched, {unusable} unusable, "
          f"{errors} errors, {total} total", file=sys.stderr)
