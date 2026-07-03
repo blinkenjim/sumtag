@@ -84,7 +84,7 @@ def run(args) -> int:
     roots = args.directories
 
     if args.verify:
-        prescan = _prescan_verify(roots, args) if args.prescan else None
+        prescan = _prescan_verify(roots, args, rep) if args.prescan else None
         return _verify(roots, args, rep, prescan)
 
     if args.remove:
@@ -101,7 +101,7 @@ def run(args) -> int:
             rep.error(f"sumtag: {e}")
             return EXIT_ERRORS
 
-    prescan = _prescan_stamp(roots, args) if args.prescan else None
+    prescan = _prescan_stamp(roots, args, rep) if args.prescan else None
 
     try:
         return _stamp(roots, args, rep, store, prescan)
@@ -124,10 +124,14 @@ def _hash_decision(meta, live: str, args, current_major: int,
     return rehash, reason
 
 
-def _prescan_stamp(roots, args) -> tuple[int, int]:
+def _prescan_stamp(roots, args, rep: _Reporter) -> tuple[int, int]:
     """Predict how many files the real pass will hash, and their total size,
     before it begins (--prescan). Mirrors _stamp()'s own decision exactly
     (via _hash_decision) so the nnn/mmm and byte counters it prints line up.
+
+    Each directory visited is announced before its files' metadata is read
+    (bare path, or ``prescan <path>`` with -v; suppressed by -q like every
+    routine announcement).
 
     Traversal warnings (e.g. a scan root's own @sumtag-ignore) are suppressed
     here -- the real pass reports them -- so nothing gets warned about twice.
@@ -138,7 +142,8 @@ def _prescan_stamp(roots, args) -> tuple[int, int]:
     count = 0
     total_bytes = 0
     for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
-                                on_warn=lambda msg: None):
+                                on_warn=lambda msg: None,
+                                on_dir=lambda d: rep.announce(d, f"prescan {d}")):
         try:
             st = os.stat(path)
             live = schema.iso_utc_ns(st.st_mtime_ns)
@@ -152,15 +157,19 @@ def _prescan_stamp(roots, args) -> tuple[int, int]:
     return count, total_bytes
 
 
-def _prescan_verify(roots, args) -> tuple[int, int]:
+def _prescan_verify(roots, args, rep: _Reporter) -> tuple[int, int]:
     """Predict how many files --verify will actually read, and their total
     size (--prescan): every file with a usable stored digest -- the same
     set that won't come back UNVERIFIABLE.
+
+    Each directory visited is announced before its files' metadata is read,
+    same as _prescan_stamp.
     """
     count = 0
     total_bytes = 0
     for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
-                                on_warn=lambda msg: None):
+                                on_warn=lambda msg: None,
+                                on_dir=lambda d: rep.announce(d, f"prescan {d}")):
         try:
             meta = _read_meta(path)
             if meta is not None and meta.get("digests"):

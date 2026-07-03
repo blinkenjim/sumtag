@@ -32,6 +32,12 @@ For each file, sumtag reads any existing
 attribute and compares the recorded modification time to the file's current
 mtime. If they match, the file is considered up to date and is skipped.
 Otherwise the file's contents are hashed and the attribute is written.
+.PP
+Within each directory, files are processed in ascending alphabetical order
+and subdirectories are then recursed into in the same order, so the
+processing order can be followed against an
+.BR ls (1)
+listing. This holds in every mode.
 .SH RE-HASHING
 A file is hashed, or re-hashed, when any of the following hold:
 .IP \(bu 3
@@ -209,7 +215,16 @@ pass it is the files the re-hash decision (or
 .BR \-\-force )
 will actually hash; for
 .BR \-\-verify
-it is every file with a usable stored digest. The prescan pass is a
+it is every file with a usable stored digest. During the counting walk each
+directory visited is announced before any file metadata inside it is read
+(the bare directory path, or
+.I prescan path
+with
+.BR \-v ;
+suppressed by
+.BR \-q ),
+so the otherwise-silent up-front pass shows its own progress on a large
+tree. The prescan pass is a
 prediction from a separate walk, not a guarantee \(em counts can drift if the
 tree changes between the two passes. Cannot be combined with
 .BR \-\-remove .

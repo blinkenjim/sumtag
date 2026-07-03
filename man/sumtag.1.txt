@@ -27,6 +27,11 @@ DESCRIPTION
        they match, the file is considered up to date and is skipped.
        Otherwise the file's contents are hashed and the attribute is written.
 
+       Within each directory, files are processed in ascending alphabetical
+       order and subdirectories are then recursed into in the same order, so
+       the processing order can be followed against an ls(1) listing. This
+       holds in every mode.
+
 RE-HASHING
        A file is hashed, or re-hashed, when any of the following hold:
 
@@ -157,8 +162,12 @@ OPTIONS
               The counted set mirrors whichever mode is running: for the
               normal hash/stamp pass it is the files the re-hash decision (or
               --force) will actually hash; for --verify it is every file with
-              a usable stored digest. The prescan pass is a prediction from a
-              separate walk, not a guarantee -- counts can drift if the tree
+              a usable stored digest. During the counting walk each directory
+              visited is announced before any file metadata inside it is read
+              (the bare directory path, or prescan path with -v; suppressed by
+              -q), so the otherwise-silent up-front pass shows its own
+              progress on a large tree. The prescan pass is a prediction from
+              a separate walk, not a guarantee -- counts can drift if the tree
               changes between the two passes. Cannot be combined with
               --remove.
 

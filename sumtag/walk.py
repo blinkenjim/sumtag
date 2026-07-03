@@ -24,6 +24,7 @@ def iter_files(
     *,
     respect_ignore: bool = True,
     on_warn: Callable[[str], None] | None = None,
+    on_dir: Callable[[str], None] | None = None,
 ) -> Iterator[str]:
     """Yield each file path under ``roots``, honoring @sumtag-ignore markers.
 
@@ -31,17 +32,32 @@ def iter_files(
     files are not yielded and it is not descended into. A marker on an explicit
     scan root is honored but draws a warning via ``on_warn`` (CLAUDE.md
     "Precedence and overrides"). The marker file itself is never yielded.
+
+    ``on_dir`` is called with each directory actually visited -- after the
+    prune check, before any of its files are yielded -- so a caller can
+    announce the directory ahead of reading anything inside it. Pruned
+    directories and file roots draw no call.
+
+    Traversal is deterministic: within each directory, files are yielded in
+    ascending alphabetical order and subdirectories are recursed into in the
+    same order (files first, then subdirectories -- os.walk's shape), so the
+    processing order tracks an ls listing or Finder window. Roots are
+    processed in the order given.
     """
     for start in roots:
         if os.path.isfile(start):
             yield start
             continue
         for dirpath, dirs, files in os.walk(start, topdown=True):
+            dirs.sort()   # in place: fixes the recursion order
+            files.sort()
             if respect_ignore and IGNORE_MARKER in files:
                 if on_warn is not None and _same_path(dirpath, start):
                     on_warn(f"sumtag: {start}: @sumtag-ignore on scan root; skipping")
                 dirs[:] = []  # prune the subtree
                 continue       # and skip this directory's files
+            if on_dir is not None:
+                on_dir(dirpath)
             for name in files:
                 if name == IGNORE_MARKER:
                     continue   # the marker is never hashed or stamped

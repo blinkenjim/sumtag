@@ -17,6 +17,8 @@ For each file in a directory tree, sumtag:
 2. Skips the file if the recorded mtime matches (already up-to-date).
 3. Otherwise, computes the XXH3 hash of the file's contents and writes the xattr.
 
+Traversal order is deterministic (added 2026-07-03 so output can be followed against an `ls` listing or Finder window): within each directory, files are processed in ascending alphabetical order, then subdirectories are recursed into in the same order. This applies to every mode — the same walker drives stamping, `--verify`, `--remove`, and `--prescan`'s counting pass, so the prescan and the real pass agree on order.
+
 ## Language & dependencies
 
 - **Python 3.x** — standard library preferred throughout.
@@ -409,6 +411,8 @@ Or without `-v` (bare path, prefix still shown):
 - `--remove` computes nothing, so `--prescan` has nothing to count; the two are a CLI error together (see Flags).
 
 **Cost and a known limitation:** the prescan walk duplicates the traversal and the xattr/stat reads the real pass is about to do anyway — a deliberate trade of one extra cheap (metadata-only, no file content read) pass for a progress indication that would otherwise be impossible to give up front. Because it is a separate pass, its counts are a prediction, not a guarantee: if the tree changes between the prescan and the real pass (a file is added, removed, or its own re-hash decision flips), `nnn`/`mmm` can drift slightly out of sync with what the real pass actually does. This is a display aid, not authoritative accounting — nothing about hashing, stamping, or exit codes depends on it. The prescan pass suppresses the traversal warnings the real pass already prints (e.g. a scan root's own `@sumtag-ignore`), so nothing is warned about twice.
+
+The prescan walk announces each directory it visits, printing the directory's path before any file metadata inside it is read — following the same bare-path/`-v` split as every routine announcement (bare path by default, `prescan <path>` with `-v`) and suppressed by `-q`. This gives the otherwise-silent up-front counting pass its own sign of life on a large tree. Pruned (`@sumtag-ignore`) directories are not announced — they are not visited.
 
 `-q` and `-v` use `action='count'` in argparse, so `-vv` and `-v -v` are equivalent.
 
