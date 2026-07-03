@@ -1,35 +1,86 @@
 #!/usr/bin/env python3
-"""grouper.py -- a playground for grouping files recorded in a sumtag database.
+"""grouper.py -- find groups of similar directories in a sumtag database.
 
-Sumtag stamps files with an XXH3 digest and mirrors that metadata into an
-optional SQLite database (see CLAUDE.md "Database storage"). Byte-identical
-files therefore share a digest, so duplicate detection is just a GROUP BY away.
-This script is the sandbox for that "intent #2" tooling -- deliberately small
-and meant to be hacked on.
+Sumtag stamps files with a checksum and mirrors that metadata into an optional
+SQLite database (see CLAUDE.md "Database storage"). Grouper is the "intent #2"
+playground built on top of it: its purpose is to find groups of directories
+whose contents are identical or nearly so -- e.g. two slightly different
+versions of the same project from slightly different times. Grouping is the
+default act; everything else is a preparation stage or an inspection helper.
 
-Usage:
-    python3 grouper.py DATABASE                # list duplicate groups
-    python3 grouper.py DATABASE --min N        # only groups of >= N files
-    python3 grouper.py DATABASE --index        # (re)build the directory index
-    python3 grouper.py DATABASE --ls DIR       # list files in one directory
+Usage (pipeline order):
+    grouper.py --database DB --prep [--fn N]  # stages 1+2: build the directory
+                                              #   index, then compare every
+                                              #   directory to every other and
+                                              #   store the pairs
+    grouper.py --database DB --index          # stage 1 alone
+    grouper.py --database DB --pairs [--fn N] # stage 2 alone
+    grouper.py --database DB --threshold 0.7  # stage 3: build + persist groups
+                                              #   (skipped if the stored grouping
+                                              #   is already current), then
+                                              #   report them
+    grouper.py --database DB                  # THE report: show stored grouping
 
-Directory index
----------------
-SQL has no collection objects, so "the files inside a directory" is modelled
-as two derived tables grouper builds (and owns) inside the sumtag database:
+    grouper.py --database DB --ls DIR             # inspect one directory
+    grouper.py --database DB --compare A B [--fn N]  # similarity of two dirs
+    grouper.py --database DB --dups [--min N]     # duplicate *files* report
+    grouper.py --database DB --top [N]            # the N (default 1) most
+                                                  #   frequent checksums,
+                                                  #   excluding empty files
 
-    dirs      -- the distillation of every files.rel_path down to the distinct
-                 directories that directly contain at least one stamped file,
-                 identified the same way files are: (mountpoint_id, rel_path).
-                 Its integer id is the directory's key.
-    dir_files -- dir_id -> files.rowid, indexed on dir_id, so selecting all
-                 files in a directory is one indexed lookup by key.
+Stages may be combined in one invocation (--prep --threshold 0.7). --index and
+--pairs are silent on success; --threshold ends with the stored-grouping
+report, same as the bare invocation. Errors go to stderr with exit 1.
 
-These are derived data, rebuilt wholesale by --index from the files table.
-They go stale when sumtag rescans (new files won't appear until the next
---index), and they reference files by rowid, which VACUUM can renumber --
-both fine for an index you can rebuild in one command. Only --index writes;
-every other mode opens the database read-only.
+Data model (grouper-owned derived tables inside the sumtag database):
+
+    dirs / dir_files -- the directory index: every files.rel_path distilled to
+        the distinct directories that directly contain at least one stamped
+        file; dir_files maps dir_id -> files.rowid (indexed) so a directory's
+        contents are one keyed lookup. Comparisons are direct-children only,
+        deliberately -- a directory's own file listing is its signature.
+    dir_pairs -- similarity for every pair of directories (dir_a < dir_b),
+        computed by one named comparison function. ALL nonzero pairs are
+        stored, not just those above any threshold: the N^2 comparison is the
+        expensive part, so the threshold stays a cheap, exploratory knob --
+        regrouping at a different threshold recomputes nothing.
+    groups / group_dirs -- the persisted grouping. group_dirs.dir_id is the
+        PRIMARY KEY, so "a directory belongs to at most one group" (the
+        partition rule) is enforced by the schema, not by code discipline.
+    grouper_meta -- provenance: which comparison function built the pairs,
+        which fn/threshold built the grouping, and when. A stored artifact
+        never masquerades as something it isn't.
+
+Grouping algorithm (settled by discussion, 2026-07-02/03):
+
+    walk dir_pairs in (similarity DESC, dir_a, dir_b) order:
+        stop at the first pair below the threshold   # the "interestingness"
+                                                     # shortcut -- lossless,
+                                                     # nothing below it could
+                                                     # have grouped anyway
+        if both dirs already placed:  skip (no merging, ever)
+        if neither placed:            the two found a new group
+        if exactly one placed:        the other joins its group
+
+    Each directory gets exactly one placement decision -- the first pair it
+    appears in, walking best-first -- and is never reconsidered, which is what
+    makes the partition structurally unbreakable. "Similar to a group" means
+    similar to any one member (single-linkage; may be refined later). No group
+    can ever have a single member. Deterministic for a given database: the
+    walk order is total, so identical inputs give identical groups.
+
+Comparison functions:
+
+    A comparison function scores two directories' contents from 0.0 (nothing
+    in common) to 1.0 (identical), consistently for the same directories in
+    the same database. They are registered by name in COMPARISONS and swapped
+    with --fn to subtly change how grouping behaves. The core functions take
+    two file-lists (the path resolution happens once, in shared plumbing --
+    --pairs calls these N^2/2 times). See each function for its semantics.
+
+Caveats: derived tables go stale when sumtag rescans (rerun the pipeline);
+dir_files references files.rowid, which VACUUM can renumber -- both fine for
+artifacts rebuilt in one command each.
 """
 
 from __future__ import annotations
@@ -38,8 +89,62 @@ import argparse
 import os
 import sqlite3
 import sys
+from collections import Counter
+from datetime import datetime, timezone
 
-# --- Directory index (grouper-owned derived tables) -------------------------
+DEFAULT_FN = "name-score"
+
+
+# --- Plumbing ----------------------------------------------------------------
+
+def connect(path: str, writable: bool = False) -> sqlite3.Connection:
+    """Open the sumtag SQLite database, read-only unless a build stage runs."""
+    if not os.path.exists(path):
+        sys.exit(f"grouper: no such database: {path}")
+    mode = "rw" if writable else "ro"
+    conn = sqlite3.connect(f"file:{path}?mode={mode}", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,)).fetchone() is not None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _set_meta(conn: sqlite3.Connection, artifact: str, fn: str,
+              threshold: float | None) -> None:
+    """Record provenance for a built artifact ('pairs' or 'groups')."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS grouper_meta (
+          artifact  TEXT PRIMARY KEY,
+          fn        TEXT NOT NULL,
+          threshold REAL,              -- NULL for the pair table
+          built_at  TEXT NOT NULL
+        )""")
+    conn.execute("""
+        INSERT INTO grouper_meta(artifact, fn, threshold, built_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(artifact) DO UPDATE SET
+            fn=excluded.fn, threshold=excluded.threshold,
+            built_at=excluded.built_at
+        """, (artifact, fn, threshold, _now_iso()))
+
+
+def _get_meta(conn: sqlite3.Connection, artifact: str):
+    if not _table_exists(conn, "grouper_meta"):
+        return None
+    return conn.execute(
+        "SELECT fn, threshold, built_at FROM grouper_meta WHERE artifact=?",
+        (artifact,)).fetchone()
+
+
+# --- Directory index (stage 1) -----------------------------------------------
 
 DIR_INDEX_SQL = """
 DROP TABLE IF EXISTS dir_files;
@@ -63,12 +168,10 @@ CREATE INDEX idx_dir_files_dir ON dir_files(dir_id);
 """
 
 
-def build_dir_index(conn: sqlite3.Connection) -> tuple[int, int]:
-    """(Re)build dirs/dir_files from the files table; returns (dirs, files).
-
-    A full drop-and-rebuild: the tables are pure derivations of files, so
-    incremental maintenance isn't worth its complexity in a playground.
-    """
+def build_dir_index(conn: sqlite3.Connection) -> None:
+    """(Re)build dirs/dir_files from the files table (a full drop-and-rebuild)."""
+    if not _table_exists(conn, "files"):
+        raise LookupError("not a sumtag database (no files table)")
     conn.executescript(DIR_INDEX_SQL)
     dir_ids: dict[tuple[int, str], int] = {}
     files = conn.execute(
@@ -85,7 +188,6 @@ def build_dir_index(conn: sqlite3.Connection) -> tuple[int, int]:
             "INSERT INTO dir_files(file_id, dir_id) VALUES (?, ?)",
             (f["rowid"], dir_id))
     conn.commit()
-    return len(dir_ids), len(files)
 
 
 def resolve_dir(conn: sqlite3.Connection, path: str):
@@ -124,66 +226,411 @@ def resolve_dir(conn: sqlite3.Connection, path: str):
     return None
 
 
+def _dir_files(conn: sqlite3.Connection, dir_id: int) -> list[sqlite3.Row]:
+    """One directory's indexed files -- the keyed lookup the index exists for."""
+    return conn.execute(
+        """
+        SELECT f.rel_path, f.algo, f.digest, f.size
+          FROM files f JOIN dir_files df ON df.file_id = f.rowid
+         WHERE df.dir_id = ?
+        """, (dir_id,)).fetchall()
+
+
 def ls(conn: sqlite3.Connection, path: str) -> int:
-    """List the files in one directory via the index -- one lookup by key."""
+    """List the files in one directory via the index."""
     d = resolve_dir(conn, path)
     if d is None:
         print(f"grouper: directory not in index: {path} (run --index?)",
               file=sys.stderr)
         return 1
-    rows = conn.execute(
-        """
-        SELECT f.rel_path, f.size, f.algo, f.digest
-          FROM files f JOIN dir_files df ON df.file_id = f.rowid
-         WHERE df.dir_id = ?
-      ORDER BY f.rel_path
-        """, (d["id"],)).fetchall()
+    rows = _dir_files(conn, d["id"])
     print(f"{os.path.join(d['mount'], d['rel_path'])}  ({len(rows)} file(s))")
-    for r in rows:
+    for r in sorted(rows, key=lambda r: r["rel_path"]):
         size = "?" if r["size"] is None else str(r["size"])
         print(f"    {r['algo']}:{r['digest']}  {size:>10}  "
               f"{os.path.basename(r['rel_path'])}")
     return 0
 
 
-# --- Duplicate report --------------------------------------------------------
+# --- Comparison functions ----------------------------------------------------
+#
+# A *comparison function* scores how similar two directories' contents are:
+# 0.0 = nothing in common, 1.0 = identical. Each function may weigh whatever
+# it likes, but must be consistent for the same directories in the same
+# database -- they are pure functions of the two file-lists, so determinism
+# comes free. Registered by name in COMPARISONS; swapped with --fn.
 
-def connect(path: str, writable: bool = False) -> sqlite3.Connection:
-    """Open the sumtag SQLite database, read-only unless building the index."""
-    if not os.path.exists(path):
-        sys.exit(f"grouper: no such database: {path}")
-    mode = "rw" if writable else "ro"
-    conn = sqlite3.connect(f"file:{path}?mode={mode}", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _multiset_jaccard(a: Counter, b: Counter) -> float:
+    """Jaccard similarity on multisets: |A & B| / |A | B|, empty-vs-empty = 1.0.
 
-
-def abspath(row: sqlite3.Row) -> str:
-    """Reconstruct a file's absolute path from mountpoint + rel_path.
-
-    The database stores paths mount-relative so they survive remounts
-    (CLAUDE.md "Path strategy"); we glue the mount point back on for display.
+    Multisets rather than sets so repetition counts: a directory holding two
+    copies of the same content is not identical to one holding a single copy.
     """
-    return os.path.join(row["mount"], row["rel_path"])
+    if not a and not b:
+        return 1.0  # two empty directories have identical (empty) contents
+    inter = sum((a & b).values())
+    union = sum((a | b).values())
+    return inter / union
 
 
-def find_duplicate_groups(conn: sqlite3.Connection, min_count: int):
+def cmp_digest(files_a, files_b) -> float:
+    """Similarity = content overlap only: multiset Jaccard over (algo, digest).
+
+    Filenames are ignored entirely -- a fully renamed copy still scores 1.0.
+    Digests only compare within one algorithm (the mixed-algorithm hazard,
+    CLAUDE.md Database storage), so the tuples carry algo alongside digest.
+    """
+    a = Counter((r["algo"], r["digest"]) for r in files_a)
+    b = Counter((r["algo"], r["digest"]) for r in files_b)
+    return _multiset_jaccard(a, b)
+
+
+def cmp_name_digest(files_a, files_b) -> float:
+    """Similarity over (basename, algo, digest): renames count against it.
+
+    All-or-nothing per file: a byte-identical file under a different name
+    matches nothing here.
+    """
+    a = Counter((os.path.basename(r["rel_path"]), r["algo"], r["digest"])
+                for r in files_a)
+    b = Counter((os.path.basename(r["rel_path"]), r["algo"], r["digest"])
+                for r in files_b)
+    return _multiset_jaccard(a, b)
+
+
+# --- Name-anchored scoring ---------------------------------------------------
+#
+# Pairs are anchored on filename (unique within a directory, so the
+# "effectively N-to-N" comparison collapses to a 1:1 match on basename):
+# each name present in both directories scores 1 point, and 2 more if the
+# pair's checksums also agree -- 3 for a perfect pair. Partial credit, in
+# other words: sharing a name means *something*, sharing name and content
+# means everything. A renamed byte-identical file scores 0 here (cmp_digest
+# is the function that still sees it). Similarity = score / max possible.
+# This gradient suits grouper's purpose: version N and N+1 of a project
+# share names exactly where content drifted.
+#
+# "Max possible" is itself a pluggable ingredient (MAX_SCORES), so denominator
+# experiments are one-line registry additions rather than new scoring code.
+
+def max_identical(n_a: int, n_b: int, n_matched: int) -> int:
+    """Max score if the directories were identical: 3 * max(|A|, |B|).
+
+    This preserves "1.0 means identical contents": a 1-file directory wholly
+    contained in a 100-file directory scores ~0.01, not 1.0. Any denominator
+    is imperfect when |A| != |B| -- but the more the counts differ, the more
+    likely the directories are dissimilar anyway, so the imperfection is
+    self-limiting.
+    """
+    return 3 * max(n_a, n_b)
+
+
+def max_smaller(n_a: int, n_b: int, n_matched: int) -> int:
+    """Max achievable given the sizes: 3 * min(|A|, |B|). Subset scores 1.0."""
+    return 3 * min(n_a, n_b)
+
+
+def max_matched(n_a: int, n_b: int, n_matched: int) -> int:
+    """Max given the names that matched: 3 * n_matched. Loosest of the three."""
+    return 3 * n_matched
+
+
+MAX_SCORES = {
+    "identical": max_identical,  # the default; keeps 1.0 == identical
+    "smaller": max_smaller,
+    "matched": max_matched,
+}
+
+
+def make_cmp_name_score(max_fn):
+    """Build a name-anchored comparison function around one max-score function."""
+    def cmp(files_a, files_b) -> float:
+        a = {os.path.basename(r["rel_path"]): (r["algo"], r["digest"])
+             for r in files_a}
+        b = {os.path.basename(r["rel_path"]): (r["algo"], r["digest"])
+             for r in files_b}
+        matched = set(a) & set(b)
+        score = 0
+        for name in matched:
+            score += 1
+            # Tuple equality requires same algo AND digest: a pair stamped
+            # under different algorithms is incomparable, so it earns the
+            # name point only -- we never guess about content.
+            if a[name] == b[name]:
+                score += 2
+        denom = max_fn(len(a), len(b), len(matched))
+        if denom == 0:
+            return 1.0  # two empty directories have identical (empty) contents
+        return score / denom
+    return cmp
+
+
+COMPARISONS = {
+    "digest": cmp_digest,           # content only; renames don't matter
+    "name-digest": cmp_name_digest, # content + filename; renames penalized
+    # Name-anchored partial-credit scoring; swap the MAX_SCORES ingredient to
+    # register a denominator variant, e.g.:
+    #   "name-score-min": make_cmp_name_score(max_smaller),
+    "name-score": make_cmp_name_score(max_identical),
+}
+
+
+def compare(conn: sqlite3.Connection, path_a: str, path_b: str,
+            fn_name: str) -> int:
+    """CLI wrapper: resolve two directory paths, score them, print similarity."""
+    fn = COMPARISONS[fn_name]
+    sides = []
+    for path in (path_a, path_b):
+        d = resolve_dir(conn, path)
+        if d is None:
+            print(f"grouper: directory not in index: {path} (run --index?)",
+                  file=sys.stderr)
+            return 1
+        sides.append(_dir_files(conn, d["id"]))
+    print(f"{fn(sides[0], sides[1]):.4f}")
+    return 0
+
+
+# --- Pair table (stage 2) ----------------------------------------------------
+
+PAIRS_SQL = """
+DROP TABLE IF EXISTS dir_pairs;
+
+CREATE TABLE dir_pairs (
+  dir_a      INTEGER NOT NULL REFERENCES dirs(id),   -- dir_a < dir_b: each
+  dir_b      INTEGER NOT NULL REFERENCES dirs(id),   -- unordered pair once
+  similarity REAL NOT NULL,
+  PRIMARY KEY (dir_a, dir_b)
+);
+
+-- Exactly the grouping walk's order, so the walk is one index scan.
+CREATE INDEX idx_dir_pairs_walk ON dir_pairs(similarity DESC, dir_a, dir_b);
+"""
+
+
+def build_pairs(conn: sqlite3.Connection, fn_name: str) -> None:
+    """Compare every directory to every other; store all nonzero pairs.
+
+    The N^2/2 comparisons are the expensive part, so every similarity > 0 is
+    kept regardless of any threshold -- the threshold stays a cheap knob at
+    grouping time. Zero-similarity pairs are omitted: they can never form or
+    join a group, so their rows would buy nothing (and on real corpora they
+    are the overwhelming majority).
+    """
+    if not _table_exists(conn, "dirs"):
+        raise LookupError("directory index missing; run --index first")
+    fn = COMPARISONS[fn_name]
+    contents: dict[int, list[sqlite3.Row]] = {}
+    for r in conn.execute(
+            """
+            SELECT df.dir_id AS dir_id, f.rel_path, f.algo, f.digest
+              FROM files f JOIN dir_files df ON df.file_id = f.rowid
+            """):
+        contents.setdefault(r["dir_id"], []).append(r)
+
+    conn.executescript(PAIRS_SQL)
+    ids = sorted(contents)
+    rows = []
+    for i, a in enumerate(ids):
+        files_a = contents[a]
+        for b in ids[i + 1:]:
+            s = fn(files_a, contents[b])
+            if s > 0.0:
+                rows.append((a, b, s))
+    conn.executemany(
+        "INSERT INTO dir_pairs(dir_a, dir_b, similarity) VALUES (?, ?, ?)",
+        rows)
+    _set_meta(conn, "pairs", fn_name, None)
+    conn.commit()
+
+
+# --- Grouping (stage 3, the point of the program) ------------------------------
+
+GROUPS_SQL = """
+DROP TABLE IF EXISTS group_dirs;
+DROP TABLE IF EXISTS groups;
+
+CREATE TABLE groups (
+  id INTEGER PRIMARY KEY               -- creation order = best-first discovery
+);
+
+CREATE TABLE group_dirs (
+  dir_id   INTEGER PRIMARY KEY REFERENCES dirs(id),  -- PK *is* the partition:
+  group_id INTEGER NOT NULL REFERENCES groups(id)    -- one group per dir, ever
+);
+CREATE INDEX idx_group_dirs_group ON group_dirs(group_id);
+"""
+
+
+def build_groups(conn: sqlite3.Connection, threshold: float,
+                 fn_arg: str | None) -> None:
+    """Walk the stored pairs best-first and persist the resulting partition.
+
+    Each directory is placed exactly once, at the first (highest-similarity)
+    pair it appears in, and never reconsidered -- so it cannot end up in two
+    groups, and groups never merge. The walk stops at the first pair below
+    the threshold: everything past it could not have grouped anyway (the
+    lossless "interestingness" shortcut).
+    """
+    pmeta = _get_meta(conn, "pairs")
+    if pmeta is None or not _table_exists(conn, "dir_pairs"):
+        raise LookupError("no stored pairs; run --pairs first")
+    if fn_arg is not None and fn_arg != pmeta["fn"]:
+        raise LookupError(
+            f"stored pairs were built with --fn {pmeta['fn']}; "
+            f"rerun --pairs --fn {fn_arg} to switch functions")
+
+    pairs = conn.execute(
+        """
+        SELECT dir_a, dir_b FROM dir_pairs
+         WHERE similarity >= ?
+      ORDER BY similarity DESC, dir_a, dir_b
+        """, (threshold,)).fetchall()
+
+    conn.executescript(GROUPS_SQL)
+    placed: dict[int, int] = {}  # dir_id -> group_id
+    for p in pairs:
+        a, b = p["dir_a"], p["dir_b"]
+        a_in, b_in = a in placed, b in placed
+        if a_in and b_in:
+            continue                       # both settled; no merging, ever
+        if not a_in and not b_in:          # the two found a new group
+            gid = conn.execute("INSERT INTO groups DEFAULT VALUES").lastrowid
+            placed[a] = placed[b] = gid
+        elif a_in:                         # the fresh one joins the group
+            placed[b] = placed[a]
+        else:
+            placed[a] = placed[b]
+    conn.executemany(
+        "INSERT INTO group_dirs(dir_id, group_id) VALUES (?, ?)",
+        list(placed.items()))
+    _set_meta(conn, "groups", pmeta["fn"], threshold)
+    conn.commit()
+
+
+def grouping_current(conn: sqlite3.Connection, threshold: float,
+                     fn_arg: str | None) -> bool:
+    """True if the stored grouping already reflects this threshold (and fn),
+    so --threshold can skip the rebuild and go straight to the report.
+
+    Stale groupings don't count: pairs rebuilt after the grouping was
+    persisted mean the grouping no longer describes the stored pairs, even at
+    the same threshold.
+    """
+    gmeta = _get_meta(conn, "groups")
+    if gmeta is None or not _table_exists(conn, "group_dirs"):
+        return False
+    if gmeta["threshold"] != threshold:
+        return False
+    if fn_arg is not None and fn_arg != gmeta["fn"]:
+        return False
+    pmeta = _get_meta(conn, "pairs")
+    if pmeta is not None and pmeta["built_at"] > gmeta["built_at"]:
+        return False
+    return True
+
+
+def report_groups(conn: sqlite3.Connection) -> int:
+    """The one reporter: print the stored grouping with its provenance."""
+    gmeta = _get_meta(conn, "groups")
+    if gmeta is None or not _table_exists(conn, "group_dirs"):
+        print("grouper: no stored grouping; run --pairs, then --threshold X",
+              file=sys.stderr)
+        return 1
+    print(f"grouping: fn={gmeta['fn']}  threshold={gmeta['threshold']:g}  "
+          f"built {gmeta['built_at']}")
+    pmeta = _get_meta(conn, "pairs")
+    if pmeta is not None and pmeta["built_at"] > gmeta["built_at"]:
+        print("note: pair table is newer than this grouping; "
+              "rerun --threshold to refresh")
+
+    # Highest stored similarity between any two members of each group -- the
+    # bond that says how alike the group is at its closest point.
+    best: dict[int, float] = {}
+    if _table_exists(conn, "dir_pairs"):
+        best = {r["group_id"]: r["best"] for r in conn.execute(
+            """
+            SELECT ga.group_id AS group_id, MAX(p.similarity) AS best
+              FROM dir_pairs p
+              JOIN group_dirs ga ON ga.dir_id = p.dir_a
+              JOIN group_dirs gb ON gb.dir_id = p.dir_b
+                               AND gb.group_id = ga.group_id
+          GROUP BY ga.group_id
+            """)}
+
+    rows = conn.execute(
+        """
+        SELECT gd.group_id, m.path AS mount, d.rel_path
+          FROM group_dirs gd
+          JOIN dirs d ON d.id = gd.dir_id
+          JOIN mountpoints m ON m.id = d.mountpoint_id
+      ORDER BY gd.group_id, m.path, d.rel_path
+        """).fetchall()
+    by_gid: dict[int, list[str]] = {}
+    for r in rows:
+        path = os.path.join(r["mount"], r["rel_path"]) if r["rel_path"] \
+            else r["mount"]
+        by_gid.setdefault(r["group_id"], []).append(path)
+
+    for gid in sorted(by_gid):           # creation order: strongest bonds first
+        members = by_gid[gid]
+        top = f", best pair {best[gid]:.3f}" if gid in best else ""
+        print(f"\ngroup {gid}  ({len(members)} directories{top})")
+        for path in members:
+            print(f"    {path}")
+    print(f"\n{len(by_gid)} group(s), {len(rows)} directorie(s)")
+    return 0
+
+
+# --- Duplicate-file report (inspection helper) --------------------------------
+
+# Digest of zero-length input, per algorithm. Every empty file shares its
+# algorithm's constant, so --top excludes empties by digest value -- reliable
+# even when the nullable, --locate-populated size column was never filled in.
+EMPTY_DIGESTS = {
+    "xxh3": "2d06800538d394c2",
+    "md5": "d41d8cd98f00b204e9800998ecf8427e",
+}
+
+
+def find_duplicate_groups(conn: sqlite3.Connection, min_count: int,
+                          top_n: int | None = None,
+                          exclude_empty: bool = False):
     """Yield (algo, digest, [rows]) for every digest shared by >= min_count files.
 
     Grouping is by (algo, digest): a digest only means "same bytes" within one
     algorithm, so two files stamped under different algos won't group together
     even if identical -- the documented mixed-algorithm hazard (CLAUDE.md
     Database storage). We surface the algo in the output so that's visible.
+
+    top_n keeps only the N most frequent digests; exclude_empty drops empty
+    files (matched by EMPTY_DIGESTS, plus size <> 0 where size is known).
     """
+    params: list = []
+    where = ""
+    if exclude_empty:
+        clauses = []
+        for algo, digest in sorted(EMPTY_DIGESTS.items()):
+            clauses.append("NOT (algo = ? AND digest = ?)")
+            params += [algo, digest]
+        clauses.append("(size IS NULL OR size <> 0)")
+        where = "WHERE " + " AND ".join(clauses)
+    params.append(min_count)
+    limit = ""
+    if top_n is not None:
+        limit = "LIMIT ?"
+        params.append(top_n)
     dup_keys = conn.execute(
-        """
+        f"""
         SELECT algo, digest, COUNT(*) AS n
           FROM files
+          {where}
       GROUP BY algo, digest
         HAVING n >= ?
       ORDER BY n DESC, digest
+        {limit}
         """,
-        (min_count,),
+        params,
     ).fetchall()
 
     for key in dup_keys:
@@ -200,8 +647,10 @@ def find_duplicate_groups(conn: sqlite3.Connection, min_count: int):
         yield key["algo"], key["digest"], rows
 
 
-def report(conn: sqlite3.Connection, min_count: int) -> None:
-    groups = list(find_duplicate_groups(conn, min_count))
+def report_dups(conn: sqlite3.Connection, min_count: int,
+                top_n: int | None = None,
+                exclude_empty: bool = False) -> None:
+    groups = list(find_duplicate_groups(conn, min_count, top_n, exclude_empty))
     if not groups:
         print("no duplicate groups found")
         return
@@ -216,36 +665,93 @@ def report(conn: sqlite3.Connection, min_count: int) -> None:
             f"  ({len(inodes)} distinct inode(s) -- some are hard links)"
         print(f"\n{algo}:{digest}  x{len(rows)}{hardlink_note}")
         for r in rows:
-            print(f"    [ino {r['inode']}]  {abspath(r)}")
+            print(f"    [ino {r['inode']}]  {os.path.join(r['mount'], r['rel_path'])}")
 
     print(f"\n{len(groups)} group(s), {total_files} file(s) total")
 
 
+# --- CLI ----------------------------------------------------------------------
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="grouper.py",
-        description="Group files in a sumtag database: duplicates by digest, "
-                    "files by directory.",
+        description="Find groups of directories with identical or similar "
+                    "contents in a sumtag database. With no action flags, "
+                    "reports the stored grouping.",
     )
-    parser.add_argument("database", help="path to the sumtag SQLite database")
-    parser.add_argument("--min", type=int, default=2, metavar="N",
-                        help="only report groups of at least N files (default: 2)")
+    parser.add_argument("--database", required=True, metavar="DB",
+                        help="path to the sumtag SQLite database")
+    parser.add_argument("--prep", action="store_true",
+                        help="stages 1+2: --index then --pairs in one shot")
     parser.add_argument("--index", action="store_true",
-                        help="(re)build the dirs/dir_files directory index")
+                        help="stage 1: (re)build the dirs/dir_files directory "
+                             "index (silent)")
+    parser.add_argument("--pairs", action="store_true",
+                        help="stage 2: compare every directory to every other "
+                             "and store all nonzero similarities (silent)")
+    parser.add_argument("--threshold", type=float, metavar="X",
+                        help="stage 3: build + persist the grouping from "
+                             "stored pairs, using X (0.0-1.0) as the "
+                             "similar-enough bar (skipped if the stored "
+                             "grouping is already current), then report it")
+    parser.add_argument("--fn", choices=sorted(COMPARISONS),
+                        help=f"comparison function for --pairs/--compare "
+                             f"(default: {DEFAULT_FN})")
     parser.add_argument("--ls", metavar="DIR",
-                        help="list the files in DIR (absolute or mount-relative) "
-                             "using the directory index")
+                        help="list the files in DIR (absolute or "
+                             "mount-relative) using the directory index")
+    parser.add_argument("--compare", nargs=2, metavar=("DIR_A", "DIR_B"),
+                        help="print the similarity (0.0-1.0) of two "
+                             "directories' contents")
+    parser.add_argument("--dups", action="store_true",
+                        help="report duplicate files (same digest)")
+    parser.add_argument("--top", type=int, nargs="?", const=1, metavar="N",
+                        help="report the N (default 1) most frequently "
+                             "occurring checksums and their files, excluding "
+                             "empty files")
+    parser.add_argument("--min", type=int, default=2, metavar="N",
+                        help="--dups/--top: only groups of at least N files "
+                             "(default: 2)")
     args = parser.parse_args(argv)
 
-    conn = connect(args.database, writable=args.index)
+    if args.threshold is not None and not 0.0 <= args.threshold <= 1.0:
+        parser.error("--threshold must be between 0.0 and 1.0")
+    if args.dups and args.top is not None:
+        parser.error("--dups and --top are mutually exclusive")
+    if args.top is not None and args.top < 1:
+        parser.error("--top must be at least 1")
+
+    if args.prep:
+        args.index = args.pairs = True
+
+    building = args.index or args.pairs or args.threshold is not None
+    conn = connect(args.database, writable=building)
     try:
-        if args.index:
-            n_dirs, n_files = build_dir_index(conn)
-            print(f"indexed {n_files} file(s) across {n_dirs} directorie(s)")
+        try:
+            if args.index:
+                build_dir_index(conn)
+            if args.pairs:
+                build_pairs(conn, args.fn or DEFAULT_FN)
+            if args.threshold is not None \
+                    and not grouping_current(conn, args.threshold, args.fn):
+                build_groups(conn, args.threshold, args.fn)
+        except LookupError as e:
+            print(f"grouper: {e}", file=sys.stderr)
+            return 1
+
         if args.ls is not None:
             return ls(conn, args.ls)
-        if not args.index:
-            report(conn, args.min)
+        if args.compare is not None:
+            return compare(conn, args.compare[0], args.compare[1],
+                           args.fn or DEFAULT_FN)
+        if args.dups:
+            report_dups(conn, args.min)
+            return 0
+        if args.top is not None:
+            report_dups(conn, args.min, top_n=args.top, exclude_empty=True)
+            return 0
+        if args.threshold is not None or not building:
+            return report_groups(conn)
     finally:
         conn.close()
     return 0
