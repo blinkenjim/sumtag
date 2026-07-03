@@ -119,7 +119,10 @@ The xattr lives physically on the file, so it needs no path — it is self-locat
 
 Paths are stored **relative to the mount point**, not as absolute paths. Sumtag targets archives and backups — drives that get moved and remounted at different locations (`/mnt/backup` today; `/Volumes/backup` or `/mnt/disk2` tomorrow). A mount-relative path stays stable across remounts, whereas an absolute path goes stale the moment the mount point changes.
 
-The mount point is found by walking up from the file with `os.path.ismount()` (stdlib, cross-platform, no new dependency). The mount point itself is recorded separately, so the absolute path can be reconstructed as `mount_point + rel_path`.
+The mount point itself is recorded separately, so the absolute path can be reconstructed as `mount_point + rel_path`. How the mount point is found is platform-specific:
+
+- **Linux and other platforms**: walk up from the file with `os.path.ismount()` (stdlib, no new dependency), which detects a mount by the change in `st_dev` between a directory and its parent.
+- **macOS**: `os.path.ismount()` is **not reliable** and is not used. Under APFS the read-only System volume (`/`) and the writable Data volume (`/System/Volumes/Data`) are joined by *firmlinks* and share a single `st_dev`, so `ismount()` sees no boundary and walks straight past the real mount up to `/` — recording a file in `~/Development` under mount `/` instead of `/System/Volumes/Data`. Instead sumtag calls **`statfs(2)`** (bound via `ctypes` on libSystem, the same no-second-dependency approach as the xattr layer), whose `f_mntonname` field is the true mount point — exactly what `df(1)` reports. Because a firmlinked path (`/Users/x`) is not lexically beneath its own mount (`/System/Volumes/Data`), `rel_path` is computed by rebasing the whole rooted path under the mount (the Data volume's contents are firmlinked to root), verified with `samefile` so `mount_point + rel_path` always recomposes to the original file.
 
 Known limitation (future work): a mount-relative path is not a *globally* stable filesystem identity — mounting two different filesystems at the same point at different times produces colliding keys. A filesystem UUID would be the truly stable identifier, but obtaining one portably is platform-specific and out of scope for now.
 

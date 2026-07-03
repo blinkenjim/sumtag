@@ -235,6 +235,12 @@ def catalog() -> list[Scenario]:
             k.expect(r.digest == s.actual_digest, "db digest should match content")
             k.expect(r.rel_path.endswith("data.bin"),
                      f"rel_path should end with data.bin, got {r.rel_path!r}")
+            # mountpoint + rel_path must recompose to the actual file -- guards
+            # against a rel_path that escapes its mount (the macOS firmlink bug,
+            # where relpath produced ../../.. against /System/Volumes/Data).
+            recon = os.path.join(r.mountpoint, r.rel_path)
+            k.expect(os.path.exists(recon) and os.path.samefile(recon, str(root / "data.bin")),
+                     f"mountpoint+rel_path should recompose to the file, got {recon!r}")
         k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
 
     scenarios.append(Scenario(

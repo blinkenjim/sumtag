@@ -15,7 +15,123 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import sys
 from dataclasses import dataclass
+
+# --- Mount-point detection -------------------------------------------------
+#
+# The database stores paths relative to their mount point (CLAUDE.md "Path
+# strategy"), so we must find the mount a file lives on. The obvious tool,
+# os.path.ismount(), detects a boundary by a change in st_dev between a
+# directory and its parent -- which is WRONG on macOS. Under APFS the read-only
+# System volume ("/") and the writable Data volume ("/System/Volumes/Data") are
+# joined by firmlinks and share a single st_dev, so ismount() sees no boundary
+# and walks straight past the real mount up to "/". A file in ~/Development then
+# gets recorded under mount "/" instead of "/System/Volumes/Data".
+#
+# The syscall that actually knows the answer is statfs(2): its f_mntonname field
+# is the mount point (it is what df(1) reports). We bind it via ctypes on macOS
+# -- matching xattr.py's approach of avoiding a second third-party dependency --
+# and fall back to the ismount walk elsewhere (Linux, where ismount is correct).
+
+_IS_MACOS = sys.platform == "darwin"
+
+if _IS_MACOS:
+    import ctypes
+    import ctypes.util
+
+    _MFSTYPENAMELEN = 16
+    _MAXPATHLEN = 1024
+
+    class _fsid_t(ctypes.Structure):
+        _fields_ = [("val", ctypes.c_int32 * 2)]
+
+    class _statfs_t(ctypes.Structure):
+        # struct statfs from <sys/mount.h>, 64-bit-inode layout (the modern
+        # default on all supported macOS). f_mntonname is the field we want.
+        _fields_ = [
+            ("f_bsize", ctypes.c_uint32),
+            ("f_iosize", ctypes.c_int32),
+            ("f_blocks", ctypes.c_uint64),
+            ("f_bfree", ctypes.c_uint64),
+            ("f_bavail", ctypes.c_uint64),
+            ("f_files", ctypes.c_uint64),
+            ("f_ffree", ctypes.c_uint64),
+            ("f_fsid", _fsid_t),
+            ("f_owner", ctypes.c_uint32),
+            ("f_type", ctypes.c_uint32),
+            ("f_flags", ctypes.c_uint32),
+            ("f_fssubtype", ctypes.c_uint32),
+            ("f_fstypename", ctypes.c_char * _MFSTYPENAMELEN),
+            ("f_mntonname", ctypes.c_char * _MAXPATHLEN),
+            ("f_mntfromname", ctypes.c_char * _MAXPATHLEN),
+            ("f_flags_ext", ctypes.c_uint32),
+            ("f_reserved", ctypes.c_uint32 * 7),
+        ]
+
+    _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    # arm64 exports plain `statfs` (already 64-bit inode); x86_64 needs the
+    # `$INODE64` variant to get this struct layout. Prefer the suffixed symbol
+    # where present so the layout above always matches.
+    _statfs = None
+    for _sym in ("statfs$INODE64", "statfs"):
+        try:
+            _statfs = getattr(_libc, _sym)
+        except AttributeError:
+            continue
+        _statfs.restype = ctypes.c_int
+        _statfs.argtypes = [ctypes.c_char_p, ctypes.POINTER(_statfs_t)]
+        break
+
+    def _mount_point(abs_path: str) -> str | None:
+        """The mount point of an existing path via statfs(2), or None on failure."""
+        if _statfs is None:
+            return None
+        buf = _statfs_t()
+        if _statfs(os.fsencode(abs_path), ctypes.byref(buf)) != 0:
+            return None
+        return os.fsdecode(buf.f_mntonname)
+
+else:  # Linux and other platforms: ismount() correctly sees device boundaries.
+
+    def _mount_point(abs_path: str) -> str | None:
+        return None  # no syscall shortcut; mount_relative() uses the ismount walk
+
+
+def _walk_up_mount(abs_dir: str, ismount) -> str:
+    """Walk up from a directory until ismount() reports a mount boundary."""
+    cur = abs_dir
+    while not ismount(cur):
+        parent = os.path.dirname(cur)
+        if parent == cur:  # reached the filesystem root
+            break
+        cur = parent
+    return cur
+
+
+def _relativize(abs_path: str, mount: str) -> str:
+    """The rel_path such that ``os.path.join(mount, rel)`` locates ``abs_path``.
+
+    Usually ``abs_path`` is lexically under ``mount`` and this is a plain strip.
+    But on macOS statfs may report a mount the path only *reaches through a
+    firmlink* rather than sitting beneath: e.g. ``/Users/x`` lives on the Data
+    volume mounted at ``/System/Volumes/Data`` yet is presented at root. A
+    lexical relpath there would escape upward (``../../..``) and not recompose.
+    Since the Data volume's contents are firmlinked to root, the physical
+    location is the whole rooted path rebased under the mount; we verify that
+    with ``samefile`` before trusting it, and only fall back to the (escaping)
+    lexical form if the rebase doesn't point back at the same file.
+    """
+    rel = os.path.relpath(abs_path, mount)
+    if not (rel == os.pardir or rel.startswith(os.pardir + os.sep)):
+        return rel  # abs_path is genuinely under mount -- the normal case
+    rebased = os.path.relpath(abs_path, "/")
+    try:
+        if os.path.samefile(os.path.join(mount, rebased), abs_path):
+            return rebased
+    except OSError:
+        pass
+    return rel
 
 # A value is a DSN iff it matches scheme://… ; otherwise it is a SQLite file
 # path (a bare "mysql:host", with no slashes, is a path — ':' is legal in names).
@@ -173,14 +289,13 @@ def open_store(value: str):
 def mount_relative(path, ismount=os.path.ismount) -> tuple[str, str]:
     """Return ``(mount_point, rel_path)`` for ``path``.
 
-    Walks up with ``ismount`` (injectable for testing) until a mount boundary,
-    so the stored path stays stable across remounts (CLAUDE.md "Path strategy").
+    The mount point is stored separately so the path stays stable across
+    remounts (CLAUDE.md "Path strategy"). On macOS it comes from statfs(2),
+    which sees APFS firmlink boundaries that ``os.path.ismount`` cannot; on
+    other platforms (and as a fallback if statfs fails) it comes from walking
+    up with ``ismount`` (injectable for testing) until a mount boundary.
     """
     ap = os.path.abspath(path)
-    cur = ap if os.path.isdir(ap) else os.path.dirname(ap)
-    while not ismount(cur):
-        parent = os.path.dirname(cur)
-        if parent == cur:  # reached the filesystem root
-            break
-        cur = parent
-    return cur, os.path.relpath(ap, cur)
+    start = ap if os.path.isdir(ap) else os.path.dirname(ap)
+    mount = _mount_point(ap) or _walk_up_mount(start, ismount)
+    return mount, _relativize(ap, mount)
