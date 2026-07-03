@@ -15,5 +15,8 @@ env/
 # Editor / OS cruft
 .DS_Store
 
+# Scratch sumtag databases from experimentation (grouper.py, manual runs)
+*.sqlite
+
 # Local Claude Code config (machine-specific)
 .claude/settings.local.json
