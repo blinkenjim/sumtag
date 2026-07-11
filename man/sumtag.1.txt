@@ -46,10 +46,10 @@ RE-HASHING
 
        Freshness is algorithm-agnostic: a file with any current digest,
        regardless of which algorithm produced it, counts as up to date. A
-       stored digest is never recomputed merely because a different
-       algorithm is now preferred; when a re-hash does happen for one of the
-       reasons above, it replaces the file's single stored digest rather
-       than keeping the old one alongside it.
+       stored digest is never recomputed merely because a different algorithm
+       is now preferred; when a re-hash does happen for one of the reasons
+       above, it replaces the file's single stored digest rather than keeping
+       the old one alongside it.
 
 OPTIONS
        -n, --dry-run
@@ -74,17 +74,15 @@ OPTIONS
               error. The indicator's line shows the file's size, the current
               hashing rate, a bar, the percentage complete, elapsed time, and
               an ETA, e.g.:
-
               99.3GiB   40.1MiB/s  [===============>     ]  84%   0:05:12  ETA 58s
 
               The bar is the only field whose width varies: it absorbs
               whatever room the fixed-width fields leave, and resizes live
               when the terminal window is resized.
 
-       --si
-              Display --progress sizes and rates using decimal (SI,
-              powers-of-1000: kB/MB/GB) units instead of the default binary
-              (powers-of-1024: KiB/MiB/GiB) units.
+       --si   Display --progress sizes and rates using decimal (SI, powers-
+              of-1000: kB/MB/GB) units instead of the default binary (powers-
+              of-1024: KiB/MiB/GiB) units.
 
        -f, --force
               Re-hash every file unconditionally, ignoring any existing
@@ -95,15 +93,15 @@ OPTIONS
 
        --database VALUE
               Name a database to act on.  VALUE is a SQLite file path, or a
-              scheme:// DSN. A value matching the pattern
-              `^[a-z][a-z0-9+.-]*://' is treated as a DSN (mysql://,
-              postgresql://); any other value, including one that merely
-              contains a colon, is a SQLite file path. Only SQLite is
-              implemented; a DSN is recognised and rejected as not yet
-              supported. Database paths are stored relative to the file's
-              mount point so they survive remounting at a different location.
-              --database takes no action by itself; it requires at least one
-              of --sum, --import, or --locate to say what to do with it.
+              scheme:// DSN. A value matching the pattern `^[a-z][a-
+              z0-9+.-]*://' is treated as a DSN (mysql://, postgresql://); any
+              other value, including one that merely contains a colon, is a
+              SQLite file path. Only SQLite is implemented; a DSN is
+              recognised and rejected as not yet supported. Database paths are
+              stored relative to the file's mount point so they survive
+              remounting at a different location.  --database takes no action
+              by itself; it requires at least one of --sum, --import, or
+              --locate to say what to do with it.
 
        --sum  Re-hash each file per the normal mtime-based decision (see
               RE-HASHING ) and mirror the result, in addition to the extended
@@ -148,32 +146,29 @@ OPTIONS
        --remove
               Remove the user.sumtag xattr from every file in the tree. A
               testing/reset utility, not a data-integrity primitive: no mtime
-              comparison, no hashing, just an unconditional delete of
-              whatever attribute happens to be present. Files with no
-              attribute are left alone. Combined with --dry-run, previews
-              which files would lose their stamp without removing anything.
-              Cannot be combined with --database (nor --sum, --import, or
-              --locate, which all require it), --verify, or --force.
+              comparison, no hashing, just an unconditional delete of whatever
+              attribute happens to be present. Files with no attribute are
+              left alone. Combined with --dry-run, previews which files would
+              lose their stamp without removing anything. Cannot be combined
+              with --database (nor --sum, --import, or --locate, which all
+              require it), --verify, or --force.
 
        --prescan
               Walk the tree once up front to count the files that will be
               checksummed and their total size, then prefix each hash/verify
-              announcement with an nnn/mmm file counter and a
-              bytes-so-far/total counter, e.g.:
-
+              announcement with an nnn/mmm file counter and a bytes-so-
+              far/total counter, e.g.:
               042/137  118.2MiB/4.2GiB  hash /backup/vault/photo0042.dng (reason)
-
-              The counted set mirrors whichever mode is running: for the
-              normal hash/stamp pass it is the files the re-hash decision (or
-              --force) will actually hash; for --verify it is every file with
-              a usable stored digest. During the counting walk each directory
-              visited is announced before any file metadata inside it is read
-              (the bare directory path, or prescan path with -v; suppressed by
-              -q), so the otherwise-silent up-front pass shows its own
-              progress on a large tree. The prescan pass is a prediction from
-              a separate walk, not a guarantee -- counts can drift if the tree
-              changes between the two passes. Cannot be combined with
-              --remove.
+       The counted set mirrors whichever mode is running: for the normal
+       hash/stamp pass it is the files the re-hash decision (or --force) will
+       actually hash; for --verify it is every file with a usable stored
+       digest. During the counting walk each directory visited is announced
+       before any file metadata inside it is read (the bare directory path, or
+       prescan path with -v; suppressed by -q), so the otherwise-silent up-
+       front pass shows its own progress on a large tree. The prescan pass is
+       a prediction from a separate walk, not a guarantee -- counts can drift
+       if the tree changes between the two passes. Cannot be combined with
+       --remove.
 
        --no-ignore
               Disregard all @sumtag-ignore marker files for this run,
@@ -196,6 +191,19 @@ IGNORE MARKERS
        directly on the command line is honoured, with a warning printed to
        standard error.
 
+RUN SUMMARY
+       Every run ends with a brief summary block on standard output
+       (suppressed by -q): the number of files the mode processed and their
+       cumulative size (headlined hashed, would hash, imported, verified, or
+       removed to match the mode), any nonzero skipped, errors, CORRUPT,
+       stale, or unverifiable counts, the database in use (when --database was
+       given), and the scanned directories. Byte figures honour --si.
+
+       Interrupting a run with Ctrl-C prints the same summary, prefixed by an
+       interrupted line, instead of a Python traceback; the counters cover
+       only files whose work had already completed. The process then exits 130
+       (128 + SIGINT, the shell convention).
+
 EXIT STATUS
        Without --verify, sumtag exits 0 on success and non-zero if an error
        prevented completion.
@@ -207,6 +215,8 @@ EXIT STATUS
        1      one or more checksum mismatches (corruption) were found.
 
        2      unreadable files or other errors prevented a complete check.
+
+       In any mode, a run interrupted by Ctrl-C exits 130 (see RUN SUMMARY).
 
 FILES
        user.sumtag

@@ -17,6 +17,7 @@ from . import __version__
 EXIT_OK = 0           # all verified intact / normal success
 EXIT_CORRUPTION = 1   # --verify: one or more checksum mismatches
 EXIT_ERRORS = 2       # unreadable files or errors prevented completion
+EXIT_INTERRUPTED = 130  # run cut short by Ctrl-C (128 + SIGINT)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -159,7 +160,13 @@ def main(argv: list[str] | None = None) -> int:
     _resolve_progress_quiet(raw, args)
 
     from . import engine
-    return engine.run(args)
+    try:
+        return engine.run(args)
+    except KeyboardInterrupt:
+        # engine.run() already catches Ctrl-C and prints the run summary;
+        # this backstop only catches one landing outside that window (e.g. a
+        # second Ctrl-C during the summary itself), so no traceback escapes.
+        return EXIT_INTERRUPTED
 
 
 if __name__ == "__main__":

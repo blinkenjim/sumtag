@@ -341,6 +341,22 @@ A clean outcome earns no further line — silence means nothing bad happened. `-
 
 `skip <path> (<reason>)` — a file already up-to-date, nothing done — stays gated behind `-v` entirely, with no bare-path line either: a repeat run over an already-stamped archive stays completely silent by default, with `-v` available for the full per-file accounting.
 
+### Run summary (and Ctrl-C)
+
+Every run ends with a brief summary block (added 2026-07-11) on the normal output channel — so `-q` suppresses it like any routine output. It is a small set of aligned `label: value` lines:
+
+```
+hashed:   42 files, 1.3GiB
+database: /var/db/cb.sqlite
+scanned:  /backup, /data
+```
+
+- The **headline line names what the mode did**, with the file count and cumulative byte size (byte figures honor `--si`): `hashed` for the stamp pass, `would hash` under `--dry-run`, `imported` for an `--import`/`--locate`-only run, `verified` for `--verify`, `removed: N stamps` for `--remove`. The headline always prints, even at zero — a run that did nothing says so. A run that both hashed and imported (e.g. `--force --import`, or `--sum` over a part-stamped tree) shows both lines; the zero one is dropped.
+- **Deviation counts print only when nonzero**: `skipped`, `errors`, and `--verify`'s `CORRUPT` / `stale` / `unverifiable` tallies.
+- `database:` appears when `--database` was given; `scanned:` always closes the block, listing the scan root(s) as given on the command line.
+
+**Ctrl-C prints the same summary, not a Python traceback.** `KeyboardInterrupt` is caught; the run stops where it is, prints `interrupted` followed by the identical summary block, and exits **130** (128 + SIGINT, the shell convention — distinct from `--verify`'s 0/1/2, so a gating cron job can tell "interrupted" from "corrupt"). The counters only ever count *completed* files — a file whose hash was cut off mid-read is not claimed — so the interrupted summary is an honest statement of how far the run got. Any live `--progress` bar is cleared before the summary prints.
+
 ### `--progress` indicator
 
 `--progress` is triggered by *time*, not file size: a modest file on a slow network mount is just as worth watching as a huge one on fast local storage, and a huge file that happens to finish quickly needs no indicator at all. Concretely: once a single file's checksum has been computing for more than 2 seconds, a live line appears on stderr — redrawn in place (`\r`, throttled to a few updates per second) — and is cleared the moment that file's hash completes. A file that finishes under the threshold shows nothing at all.

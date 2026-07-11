@@ -256,6 +256,32 @@ use
 .B \-\-no\-ignore
 to override it. A marker found at a directory named directly on the command
 line is honoured, with a warning printed to standard error.
+.SH RUN SUMMARY
+Every run ends with a brief summary block on standard output (suppressed by
+.BR \-q ):
+the number of files the mode processed and their cumulative size (headlined
+.BR hashed ,
+.BR "would hash" ,
+.BR imported ,
+.BR verified ", or"
+.B removed
+to match the mode), any nonzero
+.BR skipped ,
+.BR errors ,
+.BR CORRUPT ,
+.BR stale ", or"
+.B unverifiable
+counts, the database in use (when
+.B \-\-database
+was given), and the scanned directories. Byte figures honour
+.BR \-\-si .
+.PP
+Interrupting a run with Ctrl-C prints the same summary, prefixed by an
+.B interrupted
+line, instead of a Python traceback; the counters cover only files whose work
+had already completed. The process then exits
+.B 130
+(128 + SIGINT, the shell convention).
 .SH EXIT STATUS
 Without
 .BR \-\-verify ,
@@ -274,6 +300,10 @@ one or more checksum mismatches (corruption) were found.
 .TP
 .B 2
 unreadable files or other errors prevented a complete check.
+.PP
+In any mode, a run interrupted by Ctrl-C exits
+.B 130
+(see RUN SUMMARY).
 .SH FILES
 .TP
 .B user.sumtag

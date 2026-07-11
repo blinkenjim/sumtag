@@ -15,6 +15,9 @@ env/
 # Editor / OS cruft
 .DS_Store
 
+# Emacs backup files
+*~
+
 # Scratch sumtag databases from experimentation (grouper.py, manual runs)
 *.sqlite
 

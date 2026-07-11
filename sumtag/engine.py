@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 
 from . import decide, hashing, progress as progress_mod, schema, store as store_mod, walk, xattr
 from .store import StatData
@@ -16,6 +17,29 @@ from .store import StatData
 EXIT_OK = 0
 EXIT_CORRUPTION = 1
 EXIT_ERRORS = 2
+EXIT_INTERRUPTED = 130  # 128 + SIGINT, the shell convention for Ctrl-C
+
+
+@dataclass
+class RunStats:
+    """Per-run counters behind the end-of-run summary (CLAUDE.md "Run summary").
+
+    Counters reflect *completed* work: a file is counted only once its hash
+    (or verify read, or removal) finished, so the summary printed after a
+    Ctrl-C never claims a file whose work was cut short.
+    """
+    hashed: int = 0
+    hashed_bytes: int = 0
+    imported: int = 0
+    imported_bytes: int = 0
+    verified: int = 0
+    verified_bytes: int = 0
+    corrupt: int = 0
+    stale: int = 0
+    unverifiable: int = 0
+    removed: int = 0
+    skipped: int = 0
+    errors: int = 0
 
 
 class _Reporter:
@@ -79,16 +103,36 @@ def _read_meta(path: str) -> dict | None:
 
 
 def run(args) -> int:
-    """Entry point from the CLI; dispatches to verify, import, or stamp."""
+    """Entry point from the CLI; dispatches to verify, import, or stamp.
+
+    Catches Ctrl-C (KeyboardInterrupt) so an interrupted run ends with the
+    same summary a completed run prints, not a Python traceback, and exits
+    EXIT_INTERRUPTED (130, the shell convention).
+    """
     rep = _Reporter(args)
+    stats = RunStats()
+    interrupted = False
+    try:
+        code = _dispatch(args, rep, stats)
+    except KeyboardInterrupt:
+        interrupted = True
+        code = EXIT_INTERRUPTED
+        if args.progress and sys.stderr.isatty():
+            sys.stderr.write("\r\033[K")  # clear any live progress bar
+            sys.stderr.flush()
+    _print_summary(args, rep, stats, interrupted)
+    return code
+
+
+def _dispatch(args, rep: _Reporter, stats: RunStats) -> int:
     roots = args.directories
 
     if args.verify:
         prescan = _prescan_verify(roots, args, rep) if args.prescan else None
-        return _verify(roots, args, rep, prescan)
+        return _verify(roots, args, rep, stats, prescan)
 
     if args.remove:
-        return _remove(roots, args, rep)
+        return _remove(roots, args, rep, stats)
 
     # A database is opened only when there is something to write to it: never
     # under -n, so --dry-run has no side effect at all (not even creating the
@@ -104,10 +148,65 @@ def run(args) -> int:
     prescan = _prescan_stamp(roots, args, rep) if args.prescan else None
 
     try:
-        return _stamp(roots, args, rep, store, prescan)
+        return _stamp(roots, args, rep, stats, store, prescan)
     finally:
         if store is not None:
             store.close()
+
+
+def _print_summary(args, rep: _Reporter, stats: RunStats, interrupted: bool) -> None:
+    """The end-of-run summary (CLAUDE.md "Run summary").
+
+    Printed after every run -- completed or Ctrl-C'd alike -- on the normal
+    output channel, so -q suppresses it. Lines are (label, value) pairs with
+    the labels padded to a common column; zero-count deviation lines
+    (skipped, errors, CORRUPT, ...) are omitted, but the mode's headline
+    count prints even at zero so an interrupted-immediately run still says so.
+    """
+    hsize = lambda n: progress_mod.human_size(n, args.si)
+    plural = lambda count, noun: f"{count} {noun}{'' if count == 1 else 's'}"
+    pairs: list[tuple[str, str]] = []
+
+    if args.remove:
+        verb = "would remove" if args.dry_run else "removed"
+        pairs.append((verb, plural(stats.removed, "stamp")))
+    elif args.verify:
+        pairs.append(("verified", f"{plural(stats.verified, 'file')}, {hsize(stats.verified_bytes)}"))
+        if stats.corrupt:
+            pairs.append(("CORRUPT", plural(stats.corrupt, "file")))
+        if stats.stale:
+            pairs.append(("stale", plural(stats.stale, "file")))
+        if stats.unverifiable:
+            pairs.append(("unverifiable", plural(stats.unverifiable, "file")))
+    else:
+        verb = "would hash" if args.dry_run else "hashed"
+        hashed_line = (verb, f"{plural(stats.hashed, 'file')}, {hsize(stats.hashed_bytes)}")
+        imported_line = ("imported", f"{plural(stats.imported, 'file')}, {hsize(stats.imported_bytes)}")
+        # The mode's natural headline always prints, even at zero; the other
+        # line appears only if it counted something (e.g. --force --import
+        # hashes; --sum over a part-stamped tree imports nothing).
+        if args.sum or not args.database:
+            pairs.append(hashed_line)
+            if stats.imported:
+                pairs.append(imported_line)
+        else:
+            if stats.hashed:
+                pairs.append(hashed_line)
+            pairs.append(imported_line)
+
+    if stats.skipped:
+        pairs.append(("skipped", plural(stats.skipped, "file")))
+    if stats.errors:
+        pairs.append(("errors", str(stats.errors)))
+    if args.database:
+        pairs.append(("database", args.database))
+    pairs.append(("scanned", ", ".join(args.directories)))
+
+    width = max(len(label) for label, _ in pairs) + 1  # +1 for the colon
+    if interrupted:
+        rep.info("interrupted")
+    for label, value in pairs:
+        rep.info(f"{label + ':':<{width}} {value}")
 
 
 def _hash_decision(meta, live: str, args, current_major: int,
@@ -200,7 +299,8 @@ def _mirror(store, path: str, meta: dict, inode: int,
                           stat=stat)
 
 
-def _stamp(roots, args, rep: _Reporter, store, prescan: tuple[int, int] | None = None) -> int:
+def _stamp(roots, args, rep: _Reporter, stats: RunStats, store,
+           prescan: tuple[int, int] | None = None) -> int:
     """Walk the tree, (re-)hashing and/or mirroring per the given flags.
 
     Without --database, or with --sum, files are (re-)hashed per the normal
@@ -250,15 +350,21 @@ def _stamp(roots, args, rep: _Reporter, store, prescan: tuple[int, int] | None =
                         ind.finish()
                     meta = schema.build_meta({schema.ALGO: digest}, live, run_started)
                     xattr.set(path, schema.XATTR_NAME, schema.dumps(meta))
+                stats.hashed += 1
+                stats.hashed_bytes += st.st_size
                 if prescan is not None:
                     bytes_so_far += st.st_size
             elif meta is not None and meta.get("digests"):
                 if use_standard_decision:
                     rep.detail(f"skip   {path} ({reason})")
+                    stats.skipped += 1
                 else:
                     rep.announce(path, f"import {path}")
+                    stats.imported += 1
+                    stats.imported_bytes += st.st_size
             else:
                 rep.announce(path, f"skip (no metadata) {path}")
+                stats.skipped += 1
 
             # Mirror in addition to the xattr: re-hashed and pre-existing
             # metadata both get mirrored, so the database reflects the whole
@@ -275,12 +381,14 @@ def _stamp(roots, args, rep: _Reporter, store, prescan: tuple[int, int] | None =
                     store.update_stat(mp_id, rel, stat_data)
         except OSError as e:
             exit_code = EXIT_ERRORS
+            stats.errors += 1
             rep.error(f"sumtag: {path}: {e}")
 
     return exit_code
 
 
-def _verify(roots, args, rep: _Reporter, prescan: tuple[int, int] | None = None) -> int:
+def _verify(roots, args, rep: _Reporter, stats: RunStats,
+            prescan: tuple[int, int] | None = None) -> int:
     any_corruption = False
     any_error = False
     verify_index = 0
@@ -296,6 +404,7 @@ def _verify(roots, args, rep: _Reporter, prescan: tuple[int, int] | None = None)
 
             if meta is None or not meta.get("digests"):
                 rep.info(f"unverifiable {path}")
+                stats.unverifiable += 1
                 any_error = True  # the check could not be completed for this file
                 continue
 
@@ -313,16 +422,21 @@ def _verify(roots, args, rep: _Reporter, prescan: tuple[int, int] | None = None)
                     ind.finish()
             if prescan is not None:
                 bytes_so_far += st.st_size
+            stats.verified += 1
+            stats.verified_bytes += st.st_size
             outcome = decide.classify_verify(meta, live, computed)
 
             if outcome == decide.CORRUPTION:
                 rep.info(f"CORRUPT {path}")
+                stats.corrupt += 1
                 any_corruption = True
             elif outcome == decide.STALE:
                 rep.info(f"stale  {path} (modified since hash; restamp needed)")
+                stats.stale += 1
             # else: clean verify -- silence means nothing bad happened
         except OSError as e:
             any_error = True
+            stats.errors += 1
             rep.error(f"sumtag: {path}: {e}")
 
     if any_corruption:
@@ -332,7 +446,7 @@ def _verify(roots, args, rep: _Reporter, prescan: tuple[int, int] | None = None)
     return EXIT_OK
 
 
-def _remove(roots, args, rep: _Reporter) -> int:
+def _remove(roots, args, rep: _Reporter, stats: RunStats) -> int:
     """Strip the user.sumtag xattr from every file in the tree (--remove).
 
     A testing/reset utility, not a data-integrity primitive: there is no
@@ -348,14 +462,19 @@ def _remove(roots, args, rep: _Reporter) -> int:
             if args.dry_run:
                 if xattr.get(path, schema.XATTR_NAME) is None:
                     rep.detail(f"skip {path} (no metadata)")
+                    stats.skipped += 1
                 else:
                     rep.announce(path, f"would remove {path}")
+                    stats.removed += 1
             elif xattr.remove(path, schema.XATTR_NAME):
                 rep.announce(path, f"remove {path}")
+                stats.removed += 1
             else:
                 rep.detail(f"skip {path} (no metadata)")
+                stats.skipped += 1
         except OSError as e:
             exit_code = EXIT_ERRORS
+            stats.errors += 1
             rep.error(f"sumtag: {path}: {e}")
 
     return exit_code
