@@ -17,6 +17,8 @@ the per-file announcement (CLAUDE.md "Status lines") before hashing began.
 
 from __future__ import annotations
 
+import os
+import signal
 import sys
 import time
 from typing import Optional
@@ -28,10 +30,11 @@ THRESHOLD_SECONDS = 2.0
 #: flood the terminal with a rewrite per 1 MiB chunk.
 _RENDER_INTERVAL = 0.2
 
-#: Target line width the fixed-width fields are budgeted against. Only the
-#: bar stretches to absorb whatever width is left, so the numbers never
-#: jitter. Reacting to the terminal's actual width (SIGWINCH) is future work.
-_LINE_WIDTH = 80
+#: Line width used when the terminal's width cannot be determined. Normally
+#: the line is budgeted against the terminal's actual width, re-queried when
+#: SIGWINCH reports a resize; only the bar stretches to absorb whatever width
+#: is left, so the numbers never jitter (CLAUDE.md "Line format").
+_FALLBACK_LINE_WIDTH = 80
 
 _SIZE_W = 8
 _RATE_W = 10
@@ -47,7 +50,49 @@ _FIXED_WIDTH = (
     + 2 + _ELAPSED_W             # separator, elapsed
     + 2 + len("ETA ") + _ETA_W   # separator, "ETA ", eta
 )
-_BAR_WIDTH = max(_LINE_WIDTH - _FIXED_WIDTH, 1)
+
+#: Cached terminal width, refreshed lazily: SIGWINCH only marks it stale, and
+#: the next redraw re-queries. Starts stale so the first render measures the
+#: real terminal rather than assuming the fallback.
+_line_width = _FALLBACK_LINE_WIDTH
+_width_stale = True
+_handler_installed = False
+
+
+def _query_line_width() -> int:
+    try:
+        return os.get_terminal_size(sys.stderr.fileno()).columns
+    except (OSError, ValueError):
+        return _FALLBACK_LINE_WIDTH
+
+
+def _on_winch(signum, frame) -> None:
+    # Just mark the cache stale; the ioctl happens on the next redraw, keeping
+    # the signal handler itself to a bare assignment.
+    global _width_stale
+    _width_stale = True
+
+
+def _install_winch_handler() -> None:
+    global _handler_installed
+    if _handler_installed:
+        return
+    _handler_installed = True
+    sigwinch = getattr(signal, "SIGWINCH", None)  # absent off macOS/Linux
+    if sigwinch is None:
+        return
+    try:
+        signal.signal(sigwinch, _on_winch)
+    except ValueError:
+        pass  # not in the main thread; keep the fallback width
+
+
+def _current_bar_width() -> int:
+    global _line_width, _width_stale
+    if _width_stale:
+        _width_stale = False
+        _line_width = _query_line_width()
+    return max(_line_width - _FIXED_WIDTH, 1)
 
 _BINARY_UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
 _SI_UNITS = ("B", "kB", "MB", "GB", "TB", "PB")
@@ -138,7 +183,7 @@ class Indicator:
 
         size_str = human_size(self._total, self._si)
         rate_str = human_size(rate, self._si) + "/s"
-        bar = _render_bar(frac, _BAR_WIDTH)
+        bar = _render_bar(frac, _current_bar_width())
         elapsed_str = _format_elapsed(elapsed)
         eta_str = _format_eta((self._total - read) / rate) if rate > 0 else "--"
 
@@ -166,4 +211,5 @@ def make(total: int, enabled: bool, si: bool = False) -> Optional[Indicator]:
     """
     if not enabled or not sys.stderr.isatty():
         return None
+    _install_winch_handler()
     return Indicator(total, si)

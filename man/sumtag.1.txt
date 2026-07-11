@@ -77,6 +77,10 @@ OPTIONS
 
               99.3GiB   40.1MiB/s  [===============>     ]  84%   0:05:12  ETA 58s
 
+              The bar is the only field whose width varies: it absorbs
+              whatever room the fixed-width fields leave, and resizes live
+              when the terminal window is resized.
+
        --si
               Display --progress sizes and rates using decimal (SI,
               powers-of-1000: kB/MB/GB) units instead of the default binary

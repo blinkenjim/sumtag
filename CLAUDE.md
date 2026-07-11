@@ -376,7 +376,7 @@ Fields, left to right:
 - **elapsed** — time spent hashing the current file, `H:MM:SS`.
 - **eta** — literal `ETA` followed by the estimated time remaining, in a compact human duration (`45s`, `5m12s`, `1h05m`) — deliberately distinct from elapsed's clock style, since one is a fact and the other an estimate.
 
-At 80 columns, every field except the bar has a fixed width, so the bar absorbs whatever width remains (28 characters at 80 columns given the widths above) and is the only field whose width varies. This matters for a future enhancement: handling `SIGWINCH` to resize the bar to the terminal's current width without touching any other field's layout or triggering jitter in the numbers.
+Every field except the bar has a fixed width, so the bar absorbs whatever width remains (28 characters at 80 columns given the widths above) and is the only field whose width varies. This is what lets the line track the terminal: sumtag handles `SIGWINCH` (added 2026-07-08), re-measuring the terminal's width on the next redraw after a resize and sizing the bar to fill it, without touching any other field's layout or triggering jitter in the numbers. The signal handler itself only marks the cached width stale; the actual re-measure happens on the redraw. When the width cannot be determined (or off macOS/Linux, where `SIGWINCH` may not exist), an 80-column budget is the fallback. `SIGWINCH` affects only the `--progress` bar — truncating long per-file announcement lines to the terminal width was considered alongside this and declined (2026-07-08): every other line always prints the full path, unconditionally.
 
 ### `--prescan`
 
