@@ -113,6 +113,8 @@ Each of `--sum`, `--import`, `--locate` **requires `--database`** (nothing to ac
 
 For now the database must be **SQLite**. The storage layer should be written so that other backends could be added later, but no other backend is supported yet.
 
+**The database is a sink, never a source (decided 2026-07-13).** Metadata flows only *toward* the database — computation → xattr → database (`--sum`), or existing xattr → database (`--import`/`--locate`) — never back out. Sumtag never writes an xattr from database contents: every digest stamped into an xattr was freshly computed from the file's bytes in that same run. A restore-from-database feature (re-stamping files whose xattrs were lost by trusting stored digests) is **rejected, not deferred** — the same principle as `--verify`'s refusal to heal: a stored value can be wrong with no evidence trail, while a freshly computed digest cannot lie about what was read. The planned `--db-prescan` (see TODO.md) respects this by construction: it reads only display totals and never influences what gets summed or stamped.
+
 ### `--database` value grammar
 
 The flag takes one string value (argparse accepts both `--database X` and `--database=X`). Its grammar is fixed now even though only SQLite is implemented, so that paths written into scripts today are never reinterpreted later:
@@ -241,6 +243,8 @@ There is no mtime comparison and nothing is computed: a file either has a `user.
 
 These are deliberately deferred; the formats above are shaped now so adding them later is additive, not a migration.
 
+- **Mandatory action flag, then a subcommand CLI** — decided 2026-07-13 (design details in TODO.md). Every run will require an explicit action flag (`--sum`, `--verify`, `--remove`, `--import`, `--locate`); bare `sumtag /data` becomes an error, extending the existing "no recursive operation by omission" rule from the directory to the verb. `--sum` becomes the name of the plain stamping action and drops its requires-`--database` rule (its mtime-decision semantics are untouched). This is the stepping stone to a future subcommand model (`sumtag sum /data`), where an action subcommand is structurally mandatory.
+- **`--db-prescan` and persisted prescan totals** — decided 2026-07-13 (design details in TODO.md). `--prescan` on a `--database` run stores its count/byte totals as a one-row summary; `--db-prescan` reads them back instead of re-walking the filesystem, giving approximate progress counters on very large trees (motivated by a 48TB scan whose prescan alone took over an hour). Display-only by hard rule: it never influences the summing pass.
 - **Alternate digest algorithms** (e.g. `md5`) — selectable via a future `--digest` flag (default `xxh3`). Stored in the `digests` map (one entry at a time, replaced on re-hash — see "Digest container" and "Re-hashing logic"); DB columns are already generic (`algo`/`digest`). Switching the active algorithm never forces a re-hash of already-current files by itself (freshness is algorithm-agnostic); use `--force` to deliberately re-stamp an archive under a new algorithm.
 - **Network database backends** — MySQL/MariaDB and Postgres via `--database=scheme://…`. The value grammar and `open_store()`/`Store` seam are fixed now; only SQLite is implemented.
 - **`runs` table** — normalize the repeated `run_started_at` (see Database storage).
