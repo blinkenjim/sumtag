@@ -17,6 +17,7 @@ from . import __version__
 EXIT_OK = 0           # all verified intact / normal success
 EXIT_CORRUPTION = 1   # --verify: one or more checksum mismatches
 EXIT_ERRORS = 2       # unreadable files or errors prevented completion
+EXIT_INTERRUPTED = 130  # run cut short by Ctrl-C (128 + SIGINT)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "an nnn/mmm and bytes-so-far/total counter")
     parser.add_argument("--no-ignore", action="store_true",
                         help="disregard @sumtag-ignore marker files")
+    parser.add_argument("--exclude", metavar="PATTERN", action="append",
+                        default=[],
+                        help="skip files/directories whose name matches the "
+                             "glob PATTERN; a matching directory's whole "
+                             "subtree is pruned (repeatable; unaffected by "
+                             "--no-ignore)")
     parser.add_argument("--locate", action="store_true",
                         help="stat every file and write filesystem metadata to the "
                              "database, implying --import (propagates existing "
@@ -159,7 +166,13 @@ def main(argv: list[str] | None = None) -> int:
     _resolve_progress_quiet(raw, args)
 
     from . import engine
-    return engine.run(args)
+    try:
+        return engine.run(args)
+    except KeyboardInterrupt:
+        # engine.run() already catches Ctrl-C and prints the run summary;
+        # this backstop only catches one landing outside that window (e.g. a
+        # second Ctrl-C during the summary itself), so no traceback escapes.
+        return EXIT_INTERRUPTED
 
 
 if __name__ == "__main__":

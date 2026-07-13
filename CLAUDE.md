@@ -88,6 +88,17 @@ A directory can be exempted from sumtag by placing a marker file named **`@sumta
 - **`--no-ignore` is the intended escape hatch.** It disregards all `@sumtag-ignore` markers for the run, processing everything. This is how you override exemptions — not by weakening `--force`.
 - **A marker on an explicit scan root is honored, with a warning.** If a path passed on the command line contains a top-level `@sumtag-ignore`, sumtag skips it like any other exempted directory but emits a warning to stderr, since silently doing nothing for a run the user explicitly requested would be confusing.
 
+## Command-line exclusion (`--exclude`)
+
+`--exclude PATTERN` skips anything whose **basename** matches the glob `PATTERN` (design settled 2026-07-13). It complements `@sumtag-ignore`: the marker fences off a directory by touching the filesystem; `--exclude` does it per-run from the command line, leaving nothing behind.
+
+- **Glob syntax, basename-only.** `PATTERN` is an `fnmatch`-style glob (`*.vob`, `VIDEO_TS`), matched **case-sensitively** (`fnmatchcase`, so the same name matches the same pattern on macOS and Linux) against the final path component only. There is no relative-path or anchored matching; a pattern containing `/` can never match a basename and therefore excludes nothing.
+- **Repeatable.** Give the flag once per pattern; a name matching *any* pattern is excluded.
+- **A matching directory is pruned** exactly like a marked one: not descended, nothing beneath it read, hashed, stamped, or mirrored, and the directory is not announced (no prescan line).
+- **Traversal-level, every mode.** Exclusion happens in the shared walker, so it holds across stamping, `--verify`, `--remove`, `--prescan`, and the database modes — and `--force` does not override it, for the same reason it doesn't override the marker: `--force` governs re-hash decisions for files that get visited, not what gets visited.
+- **Independent of `--no-ignore`.** `--no-ignore` governs markers only; an `--exclude` the user explicitly typed always applies. The silence rule also matches the marker: an excluded file earns no output at all, not even a `-v` skip line.
+- **An excluded scan root warns.** A root named on the command line whose own basename matches a pattern is skipped with a warning to stderr (`matches --exclude '...' on scan root; skipping`), mirroring the marker-on-root rule. The prescan pass suppresses this warning like every traversal warning, so it prints once.
+
 ## Database storage
 
 By default, sumtag stores metadata only in the per-file xattr. The optional `--database` flag names a database as a second sink; metadata is mirrored into it **in addition to** (not instead of) the xattr. The xattr remains the source of truth that travels with the file; the database is a detached, queryable mirror.
@@ -324,6 +335,7 @@ At least one directory argument is required; there is no cwd default (decided 20
 | `--import` | | bool | Never compute checksums; only copy metadata already present in xattrs into the database. Requires `--database`. |
 | `--verify` | | bool | Read-only: recompute each file's checksum and compare it to the stored digest, reporting mismatches (corruption). Writes nothing. Exit `0`/`1`/`2` = intact/corruption/errors. |
 | `--no-ignore` | | bool | Disregard all `@sumtag-ignore` marker files for this run, processing every directory regardless of markers. |
+| `--exclude` | | str (repeatable) | Skip files/directories whose basename matches the glob PATTERN; a matching directory's whole subtree is pruned. May be given multiple times. Applies in every mode; unaffected by `--no-ignore` (see Command-line exclusion). |
 | `--locate` | | bool | Stat every file visited and write the `os.stat()` metadata to the database, regardless of whether xattr work was done; implies `--import`. Requires `--database`. Useful as a periodic filesystem inventory pass (analogous to `updatedb`). |
 | `--si` | | bool | Display sizes and rates in `--progress` using decimal (SI, powers-of-1000: `kB`/`MB`/`GB`) units instead of the default binary (powers-of-1024: `KiB`/`MiB`/`GiB`) units. |
 | `--remove` | | bool | Remove the `user.sumtag` xattr from every file in the tree (see Removing stamps). A testing/reset utility, not a data-integrity primitive. Composes with `-n` to preview. |
@@ -340,6 +352,22 @@ With `--prescan`, the hash/`would hash`/`verify` announcement (bare-path or `-v`
 A clean outcome earns no further line — silence means nothing bad happened. `--verify`'s successful case in particular prints nothing beyond its announcement (no `ok` line); the announcement already was the record. Only a *deviation* from clean earns a second line, and these are **unconditional — shown with their label regardless of `-v`**, since they are alarms, not the routine "why was this touched" detail that `-v` exists to add: `CORRUPT <path>` (mismatch), `stale <path> (modified since hash; restamp needed)` (legitimately edited, not corrupt — surfaced unconditionally, like `rsync` noting a file changed mid-transfer), `unverifiable <path>` (no usable xattr to check against; replaces the announcement outright since no read is even attempted), or an error via the normal error channel (`sumtag: <path>: <error>`; the file is skipped and the run continues).
 
 `skip <path> (<reason>)` — a file already up-to-date, nothing done — stays gated behind `-v` entirely, with no bare-path line either: a repeat run over an already-stamped archive stays completely silent by default, with `-v` available for the full per-file accounting.
+
+### Run summary (and Ctrl-C)
+
+Every run ends with a brief summary block (added 2026-07-11) on the normal output channel — so `-q` suppresses it like any routine output. It is a small set of aligned `label: value` lines:
+
+```
+hashed:   42 files, 1.3GiB
+database: /var/db/cb.sqlite
+scanned:  /backup, /data
+```
+
+- The **headline line names what the mode did**, with the file count and cumulative byte size (byte figures honor `--si`): `hashed` for the stamp pass, `would hash` under `--dry-run`, `imported` for an `--import`/`--locate`-only run, `verified` for `--verify`, `removed: N stamps` for `--remove`. The headline always prints, even at zero — a run that did nothing says so. A run that both hashed and imported (e.g. `--force --import`, or `--sum` over a part-stamped tree) shows both lines; the zero one is dropped.
+- **Deviation counts print only when nonzero**: `skipped`, `errors`, and `--verify`'s `CORRUPT` / `stale` / `unverifiable` tallies.
+- `database:` appears when `--database` was given; `scanned:` always closes the block, listing the scan root(s) as given on the command line.
+
+**Ctrl-C prints the same summary, not a Python traceback.** `KeyboardInterrupt` is caught; the run stops where it is, prints `interrupted` followed by the identical summary block, and exits **130** (128 + SIGINT, the shell convention — distinct from `--verify`'s 0/1/2, so a gating cron job can tell "interrupted" from "corrupt"). The counters only ever count *completed* files — a file whose hash was cut off mid-read is not claimed — so the interrupted summary is an honest statement of how far the run got. Any live `--progress` bar is cleared before the summary prints.
 
 ### `--progress` indicator
 
@@ -416,4 +444,4 @@ The prescan walk announces each directory it visits, printing the directory's pa
 
 `-q` and `-v` use `action='count'` in argparse, so `-vv` and `-v -v` are equivalent.
 
-Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--locate`, `--si`, `--remove`, `--prescan`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.
+Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--exclude`, `--locate`, `--si`, `--remove`, `--prescan`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.
