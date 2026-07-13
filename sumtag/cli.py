@@ -49,8 +49,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "DSN; only SQLite is implemented). Requires at least "
                              "one of --sum, --import, --locate")
     parser.add_argument("--sum", action="store_true",
-                        help="compute/re-hash per the normal mtime-based decision "
-                             "and mirror the result into --database")
+                        help="stamp files: compute/re-hash per the normal "
+                             "mtime-based decision and write the xattr; with "
+                             "--database, also mirror the result")
     parser.add_argument("--import", dest="do_import", action="store_true",
                         help="copy existing xattr metadata into the database "
                              "without computing (unless --force overrides); "
@@ -65,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="scan the tree first to count files/bytes to be "
                              "checksummed, then prefix each announcement with "
                              "an nnn/mmm and bytes-so-far/total counter")
+    parser.add_argument("--db-prescan", dest="db_prescan", action="store_true",
+                        help="like --prescan, but load the counters' totals "
+                             "from the summary a previous --prescan --database "
+                             "run stored, instead of walking the filesystem "
+                             "(approximate); requires --database")
     parser.add_argument("--no-ignore", action="store_true",
                         help="disregard @sumtag-ignore marker files")
     parser.add_argument("--exclude", metavar="PATTERN", action="append",
@@ -84,12 +90,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Enforce the flag conflicts documented in CLAUDE.md / sumtag(1)."""
+    if not (args.sum or args.verify or args.remove or args.do_import or args.locate):
+        parser.error("an action is required: --sum, --verify, --remove, "
+                     "--import, or --locate")
     if args.quiet and args.verbose:
         parser.error("-q/--quiet and -v/--verbose are mutually exclusive")
     if args.force and args.dry_run:
         parser.error("--force and --dry-run are mutually exclusive")
-    if args.sum and not args.database:
-        parser.error("--sum requires --database")
     if args.do_import and not args.database:
         parser.error("--import requires --database")
     if args.locate and not args.database:
@@ -123,6 +130,15 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if args.prescan and args.remove:
         parser.error("--prescan cannot be combined with --remove "
                      "(--remove never computes anything to prescan)")
+    if args.db_prescan:
+        if not args.database:
+            parser.error("--db-prescan requires --database")
+        if args.prescan:
+            parser.error("--db-prescan cannot be combined with --prescan "
+                         "(two sources for the same counters)")
+        if args.remove:
+            parser.error("--db-prescan cannot be combined with --remove "
+                         "(--remove never computes anything to count)")
     # --progress vs -q is resolved by command-line order, not rejected here --
     # see _resolve_progress_quiet, which needs the raw argv argparse discards.
 

@@ -12,6 +12,7 @@ rather than grown speculatively for backends that do not exist yet.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -164,6 +165,17 @@ CREATE TABLE IF NOT EXISTS files (
   UNIQUE (mountpoint_id, rel_path)
 );
 CREATE INDEX IF NOT EXISTS idx_digest ON files(digest);
+CREATE TABLE IF NOT EXISTS prescan_summary (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),  -- exactly one row, ever
+  file_count  INTEGER NOT NULL,
+  total_bytes INTEGER NOT NULL,
+  roots       TEXT NOT NULL,     -- JSON array of normalized absolute scan roots
+  sum_mode    INTEGER NOT NULL,  -- counting context: --sum's standard decision?
+  force       INTEGER NOT NULL,  -- counting context: was --force in effect?
+  exclude     TEXT NOT NULL,     -- counting context: JSON array of --exclude patterns
+  no_ignore   INTEGER NOT NULL,  -- counting context: was --no-ignore in effect?
+  created_at  TEXT NOT NULL
+);
 """
 
 
@@ -185,6 +197,25 @@ class StatData:
     ctime: str      # metadata-change time, ISO 8601 UTC microseconds
     atime: str      # last-access time, ISO 8601 UTC microseconds
     birthtime: str | None  # creation time (macOS only); None elsewhere
+
+
+@dataclass
+class PrescanSummary:
+    """The one-row totals a --prescan --database run leaves for --db-prescan.
+
+    Deliberately aggregate-only, never per-file (CLAUDE.md "--db-prescan"):
+    two totals plus the context that determined which files got counted. The
+    context fields let --db-prescan refuse totals that answered a different
+    question than the current run is asking.
+    """
+    file_count: int
+    total_bytes: int
+    roots: list[str]      # normalized absolute scan roots
+    sum_mode: bool        # whether --sum's standard mtime decision drove the count
+    force: bool           # whether --force was in effect
+    exclude: list[str]    # --exclude patterns in effect
+    no_ignore: bool       # whether --no-ignore was in effect
+    created_at: str       # ISO 8601 UTC
 
 
 class SQLiteStore:
@@ -266,6 +297,20 @@ class SQLiteStore:
              mountpoint_id, rel_path),
         )
 
+    def save_prescan_summary(self, s: PrescanSummary) -> None:
+        """Store the prescan totals, replacing any previous summary (one per db)."""
+        self._conn.execute(
+            """
+            INSERT OR REPLACE INTO prescan_summary
+                (id, file_count, total_bytes, roots, sum_mode, force,
+                 exclude, no_ignore, created_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (s.file_count, s.total_bytes, json.dumps(s.roots),
+             int(s.sum_mode), int(s.force), json.dumps(s.exclude),
+             int(s.no_ignore), s.created_at),
+        )
+
     def close(self) -> None:
         self._conn.commit()
         self._conn.close()
@@ -284,6 +329,43 @@ def open_store(value: str):
         raise NotImplementedError(
             f"database backend '{scheme}://' is not yet supported")
     return SQLiteStore(value)
+
+
+def read_prescan_summary(value: str) -> PrescanSummary | None:
+    """Read the stored prescan summary from a --database value, side-effect-free.
+
+    Opens SQLite read-only so a missing database file is never created as a
+    byproduct (--db-prescan composes with -n, whose contract is no side
+    effects anywhere). Returns None when the database file, the table, or the
+    row is absent -- the caller turns that into the hard "run --prescan
+    --database first" error. Non-SQLite DSNs raise NotImplementedError,
+    matching open_store.
+    """
+    if _SCHEME_RE.match(value):
+        scheme, _, rest = value.partition("://")
+        if scheme != "sqlite":
+            raise NotImplementedError(
+                f"database backend '{scheme}://' is not yet supported")
+        path = rest
+    else:
+        path = value
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        row = conn.execute(
+            """
+            SELECT file_count, total_bytes, roots, sum_mode, force,
+                   exclude, no_ignore, created_at
+              FROM prescan_summary WHERE id = 1
+            """).fetchone()
+        conn.close()
+    except sqlite3.OperationalError:  # file absent/unopenable or table absent
+        return None
+    if row is None:
+        return None
+    return PrescanSummary(
+        file_count=row[0], total_bytes=row[1], roots=json.loads(row[2]),
+        sum_mode=bool(row[3]), force=bool(row[4]), exclude=json.loads(row[5]),
+        no_ignore=bool(row[6]), created_at=row[7])
 
 
 def mount_relative(path, ismount=os.path.ismount) -> tuple[str, str]:

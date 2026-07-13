@@ -105,15 +105,15 @@ By default, sumtag stores metadata only in the per-file xattr. The optional `--d
 
 `--database` only names *where*; it takes no action by itself. *What* happens to that database is chosen by one or more of three parallel, combinable action flags:
 
-- **`--sum`** — (re-)hash per the normal mtime-based decision (CLAUDE.md "Re-hashing logic") and mirror the result.
+- **`--sum`** — (re-)hash per the normal mtime-based decision (CLAUDE.md "Re-hashing logic") and mirror the result. (`--sum` is also the plain stamping action without `--database` — see "Actions" under CLI usage; adding `--database` is what makes it mirror.)
 - **`--import`** — never compute; only propagate metadata already present in a file's xattr (see `--import` mode below).
 - **`--locate`** — stat every file and write the `os.stat()` metadata to the database; implies `--import` (see below).
 
-Each of `--sum`, `--import`, `--locate` **requires `--database`** (nothing to act on otherwise), and `--database` **requires at least one of them** (otherwise there is no action to take — an error, not a silent no-op). They may be combined freely: e.g. `--sum --locate` computes/mirrors and captures stat columns in the same pass. `--sum` and `--import` together is redundant (`--sum` already computes and mirrors, so `--import`'s refusal to compute has nothing left to refuse) but is not an error.
+`--import` and `--locate` **require `--database`** (their sole job is feeding it), and `--database` **requires at least one of `--sum`, `--import`, `--locate`** (otherwise there is no action to take on it — an error, not a silent no-op). `--sum` does *not* require `--database` (changed 2026-07-13 when it became the general stamping action): without one it stamps xattrs only. The three may be combined freely: e.g. `--sum --locate` computes/mirrors and captures stat columns in the same pass. `--sum` and `--import` together is redundant (`--sum` already computes and mirrors, so `--import`'s refusal to compute has nothing left to refuse) but is not an error.
 
 For now the database must be **SQLite**. The storage layer should be written so that other backends could be added later, but no other backend is supported yet.
 
-**The database is a sink, never a source (decided 2026-07-13).** Metadata flows only *toward* the database — computation → xattr → database (`--sum`), or existing xattr → database (`--import`/`--locate`) — never back out. Sumtag never writes an xattr from database contents: every digest stamped into an xattr was freshly computed from the file's bytes in that same run. A restore-from-database feature (re-stamping files whose xattrs were lost by trusting stored digests) is **rejected, not deferred** — the same principle as `--verify`'s refusal to heal: a stored value can be wrong with no evidence trail, while a freshly computed digest cannot lie about what was read. The planned `--db-prescan` (see TODO.md) respects this by construction: it reads only display totals and never influences what gets summed or stamped.
+**The database is a sink, never a source (decided 2026-07-13).** Metadata flows only *toward* the database — computation → xattr → database (`--sum`), or existing xattr → database (`--import`/`--locate`) — never back out. Sumtag never writes an xattr from database contents: every digest stamped into an xattr was freshly computed from the file's bytes in that same run. A restore-from-database feature (re-stamping files whose xattrs were lost by trusting stored digests) is **rejected, not deferred** — the same principle as `--verify`'s refusal to heal: a stored value can be wrong with no evidence trail, while a freshly computed digest cannot lie about what was read. `--db-prescan` respects this by construction: it reads only display totals and never influences what gets summed or stamped.
 
 ### `--database` value grammar
 
@@ -229,7 +229,7 @@ Without the mtime gate, every normally-edited file would read as a mismatch; wit
 | `1` | one or more mismatches (corruption) found |
 | `2` | unreadable files or other errors prevented a complete check |
 
-**Conflicts:** `--verify` + `--database` (and so also `--sum`, `--import`, `--locate`, which all require `--database`) is an error — on a mismatch there is no non-arbitrary answer to *which* digest to store (the trusted stored one, or the freshly computed one under suspicion); the ambiguity is the proof they should not combine, and all three actions write to the database. `--verify` + `--force` is an error (force writes; verify must not). `--verify` + `-n` is a redundant no-op (verify is already side-effect-free) and is allowed.
+**Conflicts:** `--verify` + `--database` is an error — on a mismatch there is no non-arbitrary answer to *which* digest to store (the trusted stored one, or the freshly computed one under suspicion); the ambiguity is the proof they should not combine. `--verify` + `--sum`/`--import`/`--locate` is likewise an error (they are actions that write, and a run has one mode). `--verify` + `--force` is an error (force writes; verify must not). `--verify` + `-n` is a redundant no-op (verify is already side-effect-free) and is allowed.
 
 ## Removing stamps (`--remove`)
 
@@ -237,14 +237,13 @@ Without the mtime gate, every normally-edited file would read as a mismatch; wit
 
 There is no mtime comparison and nothing is computed: a file either has a `user.sumtag` xattr (deleted) or doesn't (silently left alone, reported as a skip gated behind `-v`, same as any other skip). The per-file announcement follows the same bare-path/`-v` rule as every other announcement (see Status lines): `remove <path>` with `-v`, bare path without it, `would remove <path>` under `--dry-run`.
 
-**Conflicts:** `--remove` + `--database` (and so also `--sum`, `--import`, `--locate`) is an error — `--remove` only ever touches the xattr, never the database, so there is nothing for a database flag to do. `--remove` + `--verify` is an error (one reads and compares, the other deletes; they cannot both be the run's mode). `--remove` + `--force` is an error — `--force` overrides a re-hash *decision*, and `--remove` has no decision to override, it always removes whatever is present. `--remove` + `-n` is allowed and is the intended way to preview what would be removed before doing it.
+**Conflicts:** `--remove` + `--database` is an error — `--remove` only ever touches the xattr, never the database, so there is nothing for a database flag to do — and `--remove` + `--sum`/`--import`/`--locate` likewise (one run, one mode). `--remove` + `--verify` is an error (one reads and compares, the other deletes; they cannot both be the run's mode). `--remove` + `--force` is an error — `--force` overrides a re-hash *decision*, and `--remove` has no decision to override, it always removes whatever is present. `--remove` + `-n` is allowed and is the intended way to preview what would be removed before doing it.
 
 ## Future work (designed-for, not built)
 
 These are deliberately deferred; the formats above are shaped now so adding them later is additive, not a migration.
 
-- **Mandatory action flag, then a subcommand CLI** — decided 2026-07-13 (design details in TODO.md). Every run will require an explicit action flag (`--sum`, `--verify`, `--remove`, `--import`, `--locate`); bare `sumtag /data` becomes an error, extending the existing "no recursive operation by omission" rule from the directory to the verb. `--sum` becomes the name of the plain stamping action and drops its requires-`--database` rule (its mtime-decision semantics are untouched). This is the stepping stone to a future subcommand model (`sumtag sum /data`), where an action subcommand is structurally mandatory.
-- **`--db-prescan` and persisted prescan totals** — decided 2026-07-13 (design details in TODO.md). `--prescan` on a `--database` run stores its count/byte totals as a one-row summary; `--db-prescan` reads them back instead of re-walking the filesystem, giving approximate progress counters on very large trees (motivated by a 48TB scan whose prescan alone took over an hour). Display-only by hard rule: it never influences the summing pass.
+- **A subcommand CLI** (`sumtag sum /data`, `sumtag verify /backup`) — the mandatory-action-flag model (built 2026-07-13; see CLI usage) is its stepping stone: every action flag maps one-to-one onto a future subcommand, and modifiers stay flags on those subcommands. The stamping verb's name can be revisited at that migration (`sum` reads like a promise to compute; `update` or `stamp` may be more honest about the converge-to-current, skip-when-fresh semantics).
 - **Alternate digest algorithms** (e.g. `md5`) — selectable via a future `--digest` flag (default `xxh3`). Stored in the `digests` map (one entry at a time, replaced on re-hash — see "Digest container" and "Re-hashing logic"); DB columns are already generic (`algo`/`digest`). Switching the active algorithm never forces a re-hash of already-current files by itself (freshness is algorithm-agnostic); use `--force` to deliberately re-stamp an archive under a new algorithm.
 - **Network database backends** — MySQL/MariaDB and Postgres via `--database=scheme://…`. The value grammar and `open_store()`/`Store` seam are fixed now; only SQLite is implemented.
 - **`runs` table** — normalize the repeated `run_started_at` (see Database storage).
@@ -310,18 +309,20 @@ sumtag = "sumtag.cli:main"
 The installed `sumtag` command is the primary form; `python3 -m sumtag` is equivalent and convenient during development.
 
 ```bash
-# Scan the current directory
-sumtag .
+# Stamp the current directory
+sumtag --sum .
 
-# Scan one or more directories
-sumtag /data /backup
+# Stamp one or more directories
+sumtag --sum /data /backup
 
-# Scan the current directory plus another directory
-sumtag . /data
+# Stamp the current directory plus another directory
+sumtag --sum . /data
 
 # Equivalent, from a source checkout (development)
-python3 -m sumtag /data /backup
+python3 -m sumtag --sum /data /backup
 ```
+
+**An explicit action flag is required** (decided 2026-07-13): every run must name what it does — one of `--sum`, `--verify`, `--remove`, `--import`, `--locate` — and a bare `sumtag /data` is a CLI error naming the choices. `--sum` is the plain stamping action (it does not require `--database`; adding one makes it also mirror — see Database storage). Before this change the stamp mode was the unnamed default; requiring the verb finishes the same principle as the no-cwd-default rule below. `--prescan` and `--db-prescan` are modifiers, never actions — with the unnamed default gone, `sumtag --prescan /data` fails the action requirement automatically, with no extra conflict rule. The action-flag requirement is also the stepping stone to a future subcommand CLI (`sumtag sum /data` — see Future work), where an action subcommand is structurally mandatory.
 
 At least one directory argument is required; there is no cwd default (decided 2026-07-03). The rule: any operation that scans a directory requires an explicit directory argument — this guards against firing a recursive operation (a bare `sumtag --remove` or `sumtag --sum`) at whatever directory you happen to be in by omission. Every current mode scans, so the rule applies to all of them; to scan the current directory, pass `.` explicitly.
 
@@ -335,7 +336,7 @@ At least one directory argument is required; there is no cwd default (decided 20
 | `--progress` | | bool | Show a live within-file progress indicator, triggered once a single file's checksum has run for more than 2 seconds. User-friendly; distinct from verbose output. |
 | `--force` | `-f` | bool | Re-hash every file unconditionally, ignoring any existing xattr metadata. |
 | `--database` | | str | Names the database to act on (SQLite path, or a `scheme://` DSN — only SQLite is implemented; DSNs are reserved for future backends). Takes no action by itself; requires at least one of `--sum`, `--import`, `--locate`. |
-| `--sum` | | bool | (Re-)hash per the normal mtime-based decision and mirror the result into `--database`. Requires `--database`. |
+| `--sum` | | bool | The stamping action: (re-)hash per the normal mtime-based decision and write the xattr. With `--database`, also mirror the result into it. |
 | `--import` | | bool | Never compute checksums; only copy metadata already present in xattrs into the database. Requires `--database`. |
 | `--verify` | | bool | Read-only: recompute each file's checksum and compare it to the stored digest, reporting mismatches (corruption). Writes nothing. Exit `0`/`1`/`2` = intact/corruption/errors. |
 | `--no-ignore` | | bool | Disregard all `@sumtag-ignore` marker files for this run, processing every directory regardless of markers. |
@@ -343,9 +344,10 @@ At least one directory argument is required; there is no cwd default (decided 20
 | `--locate` | | bool | Stat every file visited and write the `os.stat()` metadata to the database, regardless of whether xattr work was done; implies `--import`. Requires `--database`. Useful as a periodic filesystem inventory pass (analogous to `updatedb`). |
 | `--si` | | bool | Display sizes and rates in `--progress` using decimal (SI, powers-of-1000: `kB`/`MB`/`GB`) units instead of the default binary (powers-of-1024: `KiB`/`MiB`/`GiB`) units. |
 | `--remove` | | bool | Remove the `user.sumtag` xattr from every file in the tree (see Removing stamps). A testing/reset utility, not a data-integrity primitive. Composes with `-n` to preview. |
-| `--prescan` | | bool | Walk the tree once before the real pass to count the files that will be checksummed and their total size, then prefix each hash/verify announcement with an nnn/mmm file counter and a bytes-so-far/total counter (see `--prescan` below). Cannot be combined with `--remove`. |
+| `--prescan` | | bool | Walk the tree once before the real pass to count the files that will be checksummed and their total size, then prefix each hash/verify announcement with an nnn/mmm file counter and a bytes-so-far/total counter (see `--prescan` below). On a `--database` run (and not `-n`), also stores the totals as the database's one-row prescan summary (see `--db-prescan`). Cannot be combined with `--remove`. |
+| `--db-prescan` | | bool | Like `--prescan`, but load the counters' totals from the summary a previous `--prescan --database` run stored, instead of walking the filesystem — an approximate progress report bought without the extra walk (see `--db-prescan` below). Requires `--database`; cannot be combined with `--prescan` or `--remove`. |
 
-`-q` and `-v` together are an error. `--force` and `--dry-run` together are an error. `--sum`, `--import`, and `--locate` are parallel, combinable actions performed on `--database` (see Database storage); each requires `--database`, and `--database` requires at least one of them. `--force` and `--import` together are **allowed**: `--import`'s refusal to compute is a default, not a hard restriction, and `--force` is the flag whose whole job is overriding defaults about what gets (re-)computed — so `--force --import` re-hashes every file and mirrors the result. The same override applies to `--force --locate`, since `--locate` implies `--import`. `--verify` conflicts with `--database` (and so `--sum`, `--import`, `--locate`) and `--force` (see Verification); `--verify -n` is a redundant no-op and is allowed. `--remove` conflicts with `--database` (and so `--sum`, `--import`, `--locate`), `--verify`, and `--force` — for the same reason as `--verify`, it is its own standalone mode, and there is no re-hash decision for `--force` to override; `--remove -n` is allowed and is the way to preview it. `--prescan` conflicts with `--remove` for the same reason: `--remove` never computes anything, so there is nothing for `--prescan` to count. `--progress` and `-q` conflict: whichever appears later on the command line wins, with a warning to stderr. `--force` does **not** override `@sumtag-ignore` markers (see Ignore markers); use `--no-ignore` to process exempted directories.
+**An action flag is required** — one of `--sum`, `--verify`, `--remove`, `--import`, `--locate`; a run naming none is an error (see CLI usage). `-q` and `-v` together are an error. `--force` and `--dry-run` together are an error. `--sum`, `--import`, and `--locate` are parallel, combinable actions (see Database storage); `--import` and `--locate` each require `--database`, `--sum` does not (alone it stamps xattrs only), and `--database` requires at least one of the three. `--force` and `--import` together are **allowed**: `--import`'s refusal to compute is a default, not a hard restriction, and `--force` is the flag whose whole job is overriding defaults about what gets (re-)computed — so `--force --import` re-hashes every file and mirrors the result. The same override applies to `--force --locate`, since `--locate` implies `--import`. `--verify` conflicts with `--database`, `--sum`, `--import`, `--locate`, and `--force` (see Verification); `--verify -n` is a redundant no-op and is allowed. `--remove` conflicts with `--database`, `--sum`, `--import`, `--locate`, `--verify`, and `--force` — for the same reason as `--verify`, it is its own standalone mode, and there is no re-hash decision for `--force` to override; `--remove -n` is allowed and is the way to preview it. `--prescan` conflicts with `--remove` for the same reason: `--remove` never computes anything, so there is nothing for `--prescan` to count. `--db-prescan` requires `--database` (the summary lives there) and conflicts with `--prescan` (two sources for the same counters) and `--remove` (same reason as `--prescan`); `--verify` cannot take it, since `--verify` conflicts with `--database` outright. `--progress` and `-q` conflict: whichever appears later on the command line wins, with a warning to stderr. `--force` does **not** override `@sumtag-ignore` markers (see Ignore markers); use `--no-ignore` to process exempted directories.
 
 ### Status lines
 
@@ -438,7 +440,7 @@ Or without `-v` (bare path, prefix still shown):
 
 **What counts as "will be checksummed" mirrors whichever mode is running:**
 
-- For the normal hash/stamp pass (no `--database`, or `--sum`/`--import`/`--locate`), it is exactly the set of files the mtime-based re-hash decision (or `--force`) will cause to be hashed — the same files that would otherwise print `hash`/`would hash`. Files that will be skipped, imported without computing, or reported as having no metadata are not counted and do not get a prefix (CLAUDE.md "Status lines" — that line was never "the line before summing a file" to begin with).
+- For the normal hash/stamp pass (`--sum`, with or without `--database`, or `--import`/`--locate`), it is exactly the set of files the mtime-based re-hash decision (or `--force`) will cause to be hashed — the same files that would otherwise print `hash`/`would hash`. Files that will be skipped, imported without computing, or reported as having no metadata are not counted and do not get a prefix (CLAUDE.md "Status lines" — that line was never "the line before summing a file" to begin with).
 - For `--verify`, it is every file with a usable stored digest — the same set that will be read and recomputed, as opposed to reported `unverifiable` outright.
 - `--remove` computes nothing, so `--prescan` has nothing to count; the two are a CLI error together (see Flags).
 
@@ -446,6 +448,20 @@ Or without `-v` (bare path, prefix still shown):
 
 The prescan walk announces each directory it visits, printing the directory's path before any file metadata inside it is read — following the same bare-path/`-v` split as every routine announcement (bare path by default, `prescan <path>` with `-v`) and suppressed by `-q`. This gives the otherwise-silent up-front counting pass its own sign of life on a large tree. Pruned (`@sumtag-ignore`) directories are not announced — they are not visited.
 
+On a `--database` run (and not under `-n`), `--prescan` additionally **persists its totals** as the database's one-row prescan summary — file count, byte total, normalized scan roots, the full counting context (`--sum`, `--force`, `--exclude` patterns, `--no-ignore` — everything that determined which files got counted), and a timestamp — replacing any previous summary; one per database. That row is what `--db-prescan` consumes.
+
+### `--db-prescan`
+
+On a very large tree the `--prescan` walk is itself expensive (the motivating case: a 48TB filesystem whose prescan alone took over an hour) — and an interrupted `--sum` run pays it again on restart. `--db-prescan` (added 2026-07-13) is a `--prescan` alternative that reads mmm/bytes-total from the summary a previous `--prescan --database` run stored, instead of walking the filesystem: seconds instead of an hour. The real pass then runs exactly as it always has, with the counter prefix driven by the stored totals.
+
+- **Display-only, by hard rule.** The stored data never influences the summing pass in any way: the real pass walks the filesystem and makes every per-file mtime decision exactly as it does without the flag; nothing is skipped or trusted based on stored data (see Database storage's sink-never-a-source principle). Only the two totals shown in the counter prefix come from the database.
+- **Approximation by consent.** `nnn` counts what actually happens this run, against a `mmm` frozen at prescan time — so it may overshoot `mmm` (the tree grew or changed) or the run may finish below it (some of the counted work was already done, e.g. by the interrupted run the totals came from). Choosing the flag is accepting an approximate progress report; nothing about hashing, stamping, or exit codes depends on it.
+- **Match or error.** The stored summary is used **only if it answers this run's question**: the scan roots (compared as sets of normalized absolute paths, so `/data` vs `/data/` vs a relative respelling never falsely mismatches) and the full counting context must all equal the current run's. A missing summary or any mismatch is a hard error at startup (exit 2, before any side effect — the check runs before the store is even opened, so not even the database file is created): `no stored prescan totals; run --prescan --database first`, or `stored prescan totals do not match this run (<what differs>)`. Never a silent fallback to the filesystem walk the flag exists to avoid, and never a counterless multi-hour run — "an error, not a silent no-op."
+- **Announced at startup.** `using stored prescan totals: 137 files, 4.2GiB, from <timestamp>` prints on the normal output channel (`-q` suppresses it; the byte figure honors `--si`), so a consumer of stale totals is told exactly what it is consuming.
+- **Composition.** Requires `--database`. Conflicts with `--prescan` (two sources for the same counters) and `--remove` (nothing to count). `--verify` cannot take it since `--verify` conflicts with `--database` outright — and verify could never write its own mode-correct summary (it is strictly read-only), so this stays excluded unless that trade-off is ever revisited. `-n` composes: the summary is *read* (read-only open — a missing database file is not created as a byproduct) and the dry-run counters display, while `-n` separately keeps `--prescan` from persisting.
+
+The typical resume flow after an interrupted big run: the original `sumtag --sum --database db --prescan /data` stored the totals while it counted; the restart is `sumtag --sum --database db --db-prescan /data`, which skips straight to summing with counters that continue against the original plan.
+
 `-q` and `-v` use `action='count'` in argparse, so `-vv` and `-v -v` are equivalent.
 
-Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--exclude`, `--locate`, `--si`, `--remove`, `--prescan`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.
+Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--exclude`, `--locate`, `--si`, `--remove`, `--prescan`, `--db-prescan`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.

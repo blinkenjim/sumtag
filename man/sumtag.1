@@ -19,10 +19,20 @@ left to other tools, with one exception built in here: the single-pass
 integrity check offered by
 .BR \-\-verify .
 .PP
+An explicit action option is required: every run must name what it does with
+one of
+.BR \-\-sum ", " \-\-verify ", " \-\-remove ", " \-\-import ", or " \-\-locate .
+A bare
+.B sumtag
+.I DIRECTORY
+is an error. The plain stamping action is
+.BR \-\-sum ,
+which works with or without a database (see OPTIONS).
+.PP
 At least one
 .I DIRECTORY
-is required; there is no current-directory default. Any operation that scans
-a directory requires an explicit directory argument, so that a recursive
+is also required; there is no current-directory default. Any operation that
+scans a directory requires an explicit directory argument, so that a recursive
 operation is never aimed at the working directory by omission. Pass
 .B .
 explicitly to scan the current directory.
@@ -139,12 +149,13 @@ takes no action by itself; it requires at least one of
 to say what to do with it.
 .TP
 .B \-\-sum
-Re-hash each file per the normal mtime-based decision (see
+The stamping action: hash or re-hash each file per the normal mtime-based
+decision (see
 .B RE\-HASHING )
-and mirror the result, in addition to the extended attribute, into the
-database named by
+and write the extended attribute. With
 .BR \-\-database ,
-which this option requires.
+the result is additionally mirrored into the database; without one, only the
+extended attribute is written.
 .TP
 .B \-\-import
 Do not compute any checksum by default; only copy metadata already present in
@@ -185,7 +196,7 @@ mismatch. A mismatch while the stored modification time still matches the
 file's mtime indicates silent corruption; a mismatch accompanied by a newer
 mtime indicates an ordinary modification whose stamp is merely stale. Files
 with no usable metadata are reported as unverifiable. Cannot be combined with
-.BR \-\-database " (nor " \-\-sum ", " \-\-import ", or " \-\-locate ", which all require it), or " \-\-force ";"
+.BR \-\-database ", " \-\-sum ", " \-\-import ", " \-\-locate ", or " \-\-force ";"
 combining with
 .B \-\-dry\-run
 is a redundant no-op and is permitted. See
@@ -202,7 +213,7 @@ no attribute are left alone. Combined with
 .BR \-\-dry\-run ,
 previews which files would lose their stamp without removing anything. Cannot
 be combined with
-.BR \-\-database " (nor " \-\-sum ", " \-\-import ", or " \-\-locate ", which all require it), " \-\-verify ", or " \-\-force .
+.BR \-\-database ", " \-\-sum ", " \-\-import ", " \-\-locate ", " \-\-verify ", or " \-\-force .
 .TP
 .B \-\-prescan
 Walk the tree once up front to count the files that will be checksummed and
@@ -230,8 +241,37 @@ suppressed by
 so the otherwise-silent up-front pass shows its own progress on a large
 tree. The prescan pass is a
 prediction from a separate walk, not a guarantee \(em counts can drift if the
-tree changes between the two passes. Cannot be combined with
+tree changes between the two passes. On a
+.B \-\-database
+run (and not under
+.BR \-n ),
+the counted totals are also stored in the database as its single prescan
+summary, replacing any previous one; that summary is what
+.B \-\-db\-prescan
+later consumes. Cannot be combined with
 .BR \-\-remove .
+.TP
+.B \-\-db\-prescan
+Like
+.BR \-\-prescan ,
+but load the counters' totals from the summary a previous
+.B \-\-prescan \-\-database
+run stored, instead of walking the filesystem \(em on a very large tree this
+replaces an hours-long counting walk with a database read. The stored totals
+are used only if they were counted for the same scan roots (compared after
+path normalization) and under the same counting options
+.RB ( \-\-sum / \-\-import / \-\-locate ", " \-\-force ", " \-\-exclude ", " \-\-no\-ignore );
+a missing or non-matching summary is an error before any work begins (exit
+status 2), never a silent fall-back to a filesystem walk. What was loaded is
+announced at startup. The progress report is an approximation by consent: the
+per-file counter tracks what actually happens this run, so it may overshoot
+the stored total (the tree changed) or the run may finish below it (some of
+the counted work was already done \(em the typical case when resuming an
+interrupted scan). The stored data is display-only and never influences which
+files are hashed. Requires
+.BR \-\-database ;
+cannot be combined with
+.BR \-\-prescan " or " \-\-remove .
 .TP
 .B \-\-no\-ignore
 Disregard all
@@ -334,22 +374,22 @@ Extended attribute holding each file's checksum and metadata as UTF-8 JSON.
 .B @sumtag\-ignore
 Marker file that exempts its directory and subtree (see IGNORE MARKERS).
 .SH EXAMPLES
-Scan the current directory:
+Stamp the current directory:
 .PP
 .EX
-sumtag .
+sumtag \-\-sum .
 .EE
 .PP
-Scan two archives:
+Stamp two archives:
 .PP
 .EX
-sumtag /data /backup
+sumtag \-\-sum /data /backup
 .EE
 .PP
 Preview without writing anything:
 .PP
 .EX
-sumtag \-n /data
+sumtag \-\-sum \-n /data
 .EE
 .PP
 Stamp and also mirror into a SQLite database:
@@ -377,10 +417,17 @@ Verify an archive against its stored checksums:
 sumtag \-\-verify /backup
 .EE
 .PP
+Resume an interrupted database run without repeating its hour-long counting
+walk, reusing the totals the interrupted run's \-\-prescan stored:
+.PP
+.EX
+sumtag \-\-sum \-\-database /var/lib/sumtag.sqlite \-\-db\-prescan /data
+.EE
+.PP
 Stamp an archive, skipping DVD rip payloads:
 .PP
 .EX
-sumtag \-\-exclude '*.vob' \-\-exclude VIDEO_TS /data
+sumtag \-\-sum \-\-exclude '*.vob' \-\-exclude VIDEO_TS /data
 .EE
 .SH NOTES
 Timestamps are recorded in UTC with microsecond precision. Mtime comparisons

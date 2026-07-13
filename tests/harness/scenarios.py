@@ -101,7 +101,7 @@ def catalog() -> list[Scenario]:
         name="fresh_file_gets_stamped",
         description="A file with no xattr is hashed and stamped.",
         corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
-        argv=[],
+        argv=["--sum"],
         check=check_fresh,
     ))
 
@@ -119,7 +119,7 @@ def catalog() -> list[Scenario]:
         description="A file whose recorded mtime matches is not re-hashed.",
         corpus=Corpus(files=[FileSpec("data.bin", size=256,
                                       prestamp=PreStamp("wrong-digest"))]),
-        argv=[],
+        argv=["--sum"],
         check=check_skip,
     ))
 
@@ -137,7 +137,7 @@ def catalog() -> list[Scenario]:
         description="A file with an outdated recorded mtime is re-hashed.",
         corpus=Corpus(files=[FileSpec("data.bin", size=256,
                                       prestamp=PreStamp("stale"))]),
-        argv=[],
+        argv=["--sum"],
         check=check_stale,
     ))
 
@@ -154,7 +154,7 @@ def catalog() -> list[Scenario]:
         description="--force re-hashes a file that would otherwise be skipped.",
         corpus=Corpus(files=[FileSpec("data.bin", size=256,
                                       prestamp=PreStamp("wrong-digest"))]),
-        argv=["--force"],
+        argv=["--sum", "--force"],
         check=check_force,
     ))
 
@@ -205,7 +205,7 @@ def catalog() -> list[Scenario]:
                             prestamp=PreStamp("wrong-digest"))],
             ignore_dirs=["vendor"],
         ),
-        argv=[],
+        argv=["--sum"],
         check=check_prune,
     ))
 
@@ -219,7 +219,7 @@ def catalog() -> list[Scenario]:
         name="dry_run_writes_nothing",
         description="-n reports but writes no xattr.",
         corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
-        argv=["-n"],
+        argv=["--sum", "-n"],
         check=check_dryrun,
     ))
 
