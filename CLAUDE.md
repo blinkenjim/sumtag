@@ -88,6 +88,17 @@ A directory can be exempted from sumtag by placing a marker file named **`@sumta
 - **`--no-ignore` is the intended escape hatch.** It disregards all `@sumtag-ignore` markers for the run, processing everything. This is how you override exemptions — not by weakening `--force`.
 - **A marker on an explicit scan root is honored, with a warning.** If a path passed on the command line contains a top-level `@sumtag-ignore`, sumtag skips it like any other exempted directory but emits a warning to stderr, since silently doing nothing for a run the user explicitly requested would be confusing.
 
+## Command-line exclusion (`--exclude`)
+
+`--exclude PATTERN` skips anything whose **basename** matches the glob `PATTERN` (design settled 2026-07-13). It complements `@sumtag-ignore`: the marker fences off a directory by touching the filesystem; `--exclude` does it per-run from the command line, leaving nothing behind.
+
+- **Glob syntax, basename-only.** `PATTERN` is an `fnmatch`-style glob (`*.vob`, `VIDEO_TS`), matched **case-sensitively** (`fnmatchcase`, so the same name matches the same pattern on macOS and Linux) against the final path component only. There is no relative-path or anchored matching; a pattern containing `/` can never match a basename and therefore excludes nothing.
+- **Repeatable.** Give the flag once per pattern; a name matching *any* pattern is excluded.
+- **A matching directory is pruned** exactly like a marked one: not descended, nothing beneath it read, hashed, stamped, or mirrored, and the directory is not announced (no prescan line).
+- **Traversal-level, every mode.** Exclusion happens in the shared walker, so it holds across stamping, `--verify`, `--remove`, `--prescan`, and the database modes — and `--force` does not override it, for the same reason it doesn't override the marker: `--force` governs re-hash decisions for files that get visited, not what gets visited.
+- **Independent of `--no-ignore`.** `--no-ignore` governs markers only; an `--exclude` the user explicitly typed always applies. The silence rule also matches the marker: an excluded file earns no output at all, not even a `-v` skip line.
+- **An excluded scan root warns.** A root named on the command line whose own basename matches a pattern is skipped with a warning to stderr (`matches --exclude '...' on scan root; skipping`), mirroring the marker-on-root rule. The prescan pass suppresses this warning like every traversal warning, so it prints once.
+
 ## Database storage
 
 By default, sumtag stores metadata only in the per-file xattr. The optional `--database` flag names a database as a second sink; metadata is mirrored into it **in addition to** (not instead of) the xattr. The xattr remains the source of truth that travels with the file; the database is a detached, queryable mirror.
@@ -324,6 +335,7 @@ At least one directory argument is required; there is no cwd default (decided 20
 | `--import` | | bool | Never compute checksums; only copy metadata already present in xattrs into the database. Requires `--database`. |
 | `--verify` | | bool | Read-only: recompute each file's checksum and compare it to the stored digest, reporting mismatches (corruption). Writes nothing. Exit `0`/`1`/`2` = intact/corruption/errors. |
 | `--no-ignore` | | bool | Disregard all `@sumtag-ignore` marker files for this run, processing every directory regardless of markers. |
+| `--exclude` | | str (repeatable) | Skip files/directories whose basename matches the glob PATTERN; a matching directory's whole subtree is pruned. May be given multiple times. Applies in every mode; unaffected by `--no-ignore` (see Command-line exclusion). |
 | `--locate` | | bool | Stat every file visited and write the `os.stat()` metadata to the database, regardless of whether xattr work was done; implies `--import`. Requires `--database`. Useful as a periodic filesystem inventory pass (analogous to `updatedb`). |
 | `--si` | | bool | Display sizes and rates in `--progress` using decimal (SI, powers-of-1000: `kB`/`MB`/`GB`) units instead of the default binary (powers-of-1024: `KiB`/`MiB`/`GiB`) units. |
 | `--remove` | | bool | Remove the `user.sumtag` xattr from every file in the tree (see Removing stamps). A testing/reset utility, not a data-integrity primitive. Composes with `-n` to preview. |
@@ -432,4 +444,4 @@ The prescan walk announces each directory it visits, printing the directory's pa
 
 `-q` and `-v` use `action='count'` in argparse, so `-vv` and `-v -v` are equivalent.
 
-Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--locate`, `--si`, `--remove`, `--prescan`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.
+Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--exclude`, `--locate`, `--si`, `--remove`, `--prescan`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.

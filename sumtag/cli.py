@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "an nnn/mmm and bytes-so-far/total counter")
     parser.add_argument("--no-ignore", action="store_true",
                         help="disregard @sumtag-ignore marker files")
+    parser.add_argument("--exclude", metavar="PATTERN", action="append",
+                        default=[],
+                        help="skip files/directories whose name matches the "
+                             "glob PATTERN; a matching directory's whole "
+                             "subtree is pruned (repeatable; unaffected by "
+                             "--no-ignore)")
     parser.add_argument("--locate", action="store_true",
                         help="stat every file and write filesystem metadata to the "
                              "database, implying --import (propagates existing "

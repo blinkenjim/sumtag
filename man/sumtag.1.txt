@@ -172,7 +172,20 @@ OPTIONS
 
        --no-ignore
               Disregard all @sumtag-ignore marker files for this run,
-              processing every directory regardless of markers.
+              processing every directory regardless of markers.  This option
+              governs markers only; it has no effect on --exclude.
+
+       --exclude PATTERN
+              Skip any file or directory whose name matches the shell glob
+              PATTERN.  Matching is against the basename only, case-
+              sensitively; a matching directory is pruned along with its
+              entire subtree, exactly as an @sumtag-ignore marker would prune
+              it. May be repeated; a name matching any given pattern is
+              excluded. The exclusion applies in every mode, is not overridden
+              by --force, and is unaffected by --no-ignore, which governs
+              markers only. A DIRECTORY named on the command line whose own
+              name matches a pattern is skipped, with a warning printed to
+              standard error.
 
        --version
               Print version information and exit.
@@ -190,6 +203,9 @@ IGNORE MARKERS
        --no-ignore to override it. A marker found at a directory named
        directly on the command line is honoured, with a warning printed to
        standard error.
+
+       For per-run exclusion from the command line, without placing a marker
+       file, see --exclude.
 
 RUN SUMMARY
        Every run ends with a brief summary block on standard output
@@ -256,6 +272,10 @@ EXAMPLES
        Verify an archive against its stored checksums:
 
        sumtag --verify /backup
+
+       Stamp an archive, skipping DVD rip payloads:
+
+       sumtag --exclude '*.vob' --exclude VIDEO_TS /data
 
 NOTES
        Timestamps are recorded in UTC with microsecond precision. Mtime

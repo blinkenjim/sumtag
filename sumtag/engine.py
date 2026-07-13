@@ -241,6 +241,7 @@ def _prescan_stamp(roots, args, rep: _Reporter) -> tuple[int, int]:
     count = 0
     total_bytes = 0
     for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
+                                exclude=args.exclude,
                                 on_warn=lambda msg: None,
                                 on_dir=lambda d: rep.announce(d, f"prescan {d}")):
         try:
@@ -267,6 +268,7 @@ def _prescan_verify(roots, args, rep: _Reporter) -> tuple[int, int]:
     count = 0
     total_bytes = 0
     for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
+                                exclude=args.exclude,
                                 on_warn=lambda msg: None,
                                 on_dir=lambda d: rep.announce(d, f"prescan {d}")):
         try:
@@ -325,6 +327,7 @@ def _stamp(roots, args, rep: _Reporter, stats: RunStats, store,
     prescan_count, prescan_bytes = prescan if prescan is not None else (0, 0)
 
     for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
+                                exclude=args.exclude,
                                 on_warn=rep.error):
         try:
             st = os.stat(path)
@@ -396,6 +399,7 @@ def _verify(roots, args, rep: _Reporter, stats: RunStats,
     prescan_count, prescan_bytes = prescan if prescan is not None else (0, 0)
 
     for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
+                                exclude=args.exclude,
                                 on_warn=rep.error):
         try:
             meta = _read_meta(path)
@@ -457,6 +461,7 @@ def _remove(roots, args, rep: _Reporter, stats: RunStats) -> int:
     exit_code = EXIT_OK
 
     for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
+                                exclude=args.exclude,
                                 on_warn=rep.error):
         try:
             if args.dry_run:

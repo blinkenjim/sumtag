@@ -237,6 +237,24 @@ tree changes between the two passes. Cannot be combined with
 Disregard all
 .B @sumtag\-ignore
 marker files for this run, processing every directory regardless of markers.
+This option governs markers only; it has no effect on
+.BR \-\-exclude .
+.TP
+.BI \-\-exclude " PATTERN"
+Skip any file or directory whose name matches the shell glob
+.IR PATTERN .
+Matching is against the basename only, case-sensitively; a matching directory
+is pruned along with its entire subtree, exactly as an
+.B @sumtag\-ignore
+marker would prune it. May be repeated; a name matching any given pattern is
+excluded. The exclusion applies in every mode, is not overridden by
+.BR \-\-force ,
+and is unaffected by
+.BR \-\-no\-ignore ,
+which governs markers only. A
+.I DIRECTORY
+named on the command line whose own name matches a pattern is skipped, with a
+warning printed to standard error.
 .TP
 .B \-\-version
 Print version information and exit.
@@ -256,6 +274,10 @@ use
 .B \-\-no\-ignore
 to override it. A marker found at a directory named directly on the command
 line is honoured, with a warning printed to standard error.
+.PP
+For per-run exclusion from the command line, without placing a marker file,
+see
+.BR \-\-exclude .
 .SH RUN SUMMARY
 Every run ends with a brief summary block on standard output (suppressed by
 .BR \-q ):
@@ -353,6 +375,12 @@ Verify an archive against its stored checksums:
 .PP
 .EX
 sumtag \-\-verify /backup
+.EE
+.PP
+Stamp an archive, skipping DVD rip payloads:
+.PP
+.EX
+sumtag \-\-exclude '*.vob' \-\-exclude VIDEO_TS /data
 .EE
 .SH NOTES
 Timestamps are recorded in UTC with microsecond precision. Mtime comparisons
