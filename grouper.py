@@ -91,8 +91,12 @@ Comparison functions:
     --progress adds a live bar (stderr) to the build stages, following
     sumtag's conventions: opt-in, appears once a stage has run 2 seconds,
     redrawn in place, cleared on completion, suppressed when stderr is not a
-    terminal. The denominator is known a priori -- N files for --index,
-    N*(N-1)/2 comparisons for --pairs.
+    terminal. Redraws are time-based (a few per second), not event-based:
+    the bar appears and keeps ticking even while every worker is mid-stripe
+    and no result has landed yet. --pairs shows its phases in turn -- file
+    rows loaded, directories signed, then pairs scored -- so a large corpus
+    is never silently "warming up". The denominator is known a priori -- N
+    files for --index, N*(N-1)/2 comparisons for --pairs.
 
 Caveats: derived tables go stale when sumtag rescans (rerun the pipeline);
 dir_files references files.rowid, which VACUUM can renumber -- both fine for
@@ -108,7 +112,7 @@ import sqlite3
 import sys
 import time
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from datetime import datetime, timezone
 
 DEFAULT_FN = "name-score"
@@ -221,12 +225,24 @@ class Progress:
         self._next_draw = now + _REDRAW_S
         self._draw(now)
 
+    def poke(self) -> None:
+        """Redraw (if due) without recording progress. Callers waiting on
+        workers call this on a short timeout so the bar appears at the
+        2-second mark and elapsed/ETA keep ticking even before the first
+        result lands -- otherwise a long-running stripe would leave the
+        terminal silent for minutes."""
+        self.add(0)
+
     def _draw(self, now: float) -> None:
         elapsed = now - self._t0
         frac = min(self.done / self.total, 1.0)
         rate = self.done / elapsed if elapsed > 0 else 0.0
-        eta = _human_eta((self.total - self.done) / rate) \
-            if rate > 0 and self.done < self.total else "0s"
+        if 0 < self.done < self.total and rate > 0:
+            eta = _human_eta((self.total - self.done) / rate)
+        elif self.done >= self.total:
+            eta = "0s"
+        else:
+            eta = "?"       # no work finished yet; nothing to extrapolate
         left = (f"{_human_count(self.done):>7}/{_human_count(self.total)} "
                 f"{self.unit}  {_human_count(rate):>7}/s  [")
         h, rem = divmod(int(elapsed), 3600)
@@ -531,6 +547,8 @@ CREATE INDEX idx_dir_pairs_walk ON dir_pairs(similarity DESC, dir_a, dir_b);
 INSERT_PAIR_SQL = \
     "INSERT INTO dir_pairs(dir_a, dir_b, similarity) VALUES (?, ?, ?)"
 
+_INSERT_CHUNK = 100_000     # rows per executemany between progress ticks
+
 # Worker-process state, installed by _pairs_init. The signature table is
 # shipped (pickled) once per worker via the pool initializer, not once per
 # task -- macOS spawns rather than forks, so per-task shipping would drown
@@ -589,14 +607,31 @@ def build_pairs(conn: sqlite3.Connection, fn_name: str, jobs: int = 1,
     if not _table_exists(conn, "dirs"):
         raise LookupError("directory index missing; run --index first")
     make_sig, score = COMPARISONS[fn_name]
+
+    # The pre-scoring phase -- streaming every file row out of the database
+    # and distilling signatures -- is minutes of dead air on a large corpus,
+    # so it gets its own bar (files loaded, then dirs signed).
+    n_files = conn.execute("SELECT COUNT(*) FROM dir_files").fetchone()[0]
     contents: dict[int, list[sqlite3.Row]] = {}
-    for r in conn.execute(
-            """
-            SELECT df.dir_id AS dir_id, f.rel_path, f.algo, f.digest
-              FROM files f JOIN dir_files df ON df.file_id = f.rowid
-            """):
-        contents.setdefault(r["dir_id"], []).append(r)
-    sigs = {d: make_sig(files) for d, files in contents.items()}
+    load_bar = Progress(n_files, "files", progress)
+    try:
+        for r in conn.execute(
+                """
+                SELECT df.dir_id AS dir_id, f.rel_path, f.algo, f.digest
+                  FROM files f JOIN dir_files df ON df.file_id = f.rowid
+                """):
+            contents.setdefault(r["dir_id"], []).append(r)
+            load_bar.add(1)
+    finally:
+        load_bar.finish()
+    sigs: dict[int, object] = {}
+    sig_bar = Progress(len(contents), "dirs", progress)
+    try:
+        for d, files in contents.items():
+            sigs[d] = make_sig(files)
+            sig_bar.add(1)
+    finally:
+        sig_bar.finish()
     del contents
     ids = sorted(sigs)
     n = len(ids)
@@ -615,9 +650,25 @@ def build_pairs(conn: sqlite3.Connection, fn_name: str, jobs: int = 1,
                                      initargs=(sigs, ids, fn_name)) as ex:
                 futs = {ex.submit(_score_stripe, st):
                         sum(n - 1 - i for i in st) for st in stripes}
-                for fut in as_completed(futs):
-                    conn.executemany(INSERT_PAIR_SQL, fut.result())
-                    bar.add(futs[fut])
+                # Short-timeout wait rather than as_completed: a stripe is
+                # 1/(jobs*8) of the whole run, which can be minutes -- the
+                # bar must appear and keep ticking before the first one
+                # lands, not only when results arrive.
+                pending = set(futs)
+                while pending:
+                    done, pending = wait(pending, timeout=_REDRAW_S,
+                                         return_when=FIRST_COMPLETED)
+                    for fut in done:
+                        # Insert in slices, ticking between them: one giant
+                        # stripe's executemany could otherwise freeze the
+                        # bar for seconds on a huge corpus.
+                        rows = fut.result()
+                        for k in range(0, len(rows), _INSERT_CHUNK):
+                            conn.executemany(INSERT_PAIR_SQL,
+                                             rows[k:k + _INSERT_CHUNK])
+                            bar.poke()
+                        bar.add(futs[fut])
+                    bar.poke()
         else:
             for i in range(n):
                 conn.executemany(INSERT_PAIR_SQL,
