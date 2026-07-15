@@ -9,13 +9,14 @@ versions of the same project from slightly different times. Grouping is the
 default act; everything else is a preparation stage or an inspection helper.
 
 Usage (pipeline order):
-    grouper.py --database DB --prep [--fn N] [--jobs N]
+    grouper.py --database DB --prep [--fn N] [--jobs N] [--progress]
                                               # stages 1+2: build the directory
                                               #   index, then compare every
                                               #   directory to every other and
                                               #   store the pairs
-    grouper.py --database DB --index          # stage 1 alone
-    grouper.py --database DB --pairs [--fn N] [--jobs N]  # stage 2 alone
+    grouper.py --database DB --index [--progress]          # stage 1 alone
+    grouper.py --database DB --pairs [--fn N] [--jobs N] [--progress]
+                                              # stage 2 alone
     grouper.py --database DB --threshold 0.7  # stage 3: build + persist groups
                                               #   (skipped if the stored grouping
                                               #   is already current), then
@@ -87,6 +88,12 @@ Comparison functions:
     all database writes stay in the parent (SQLite has one writer). The pair
     set produced is identical at any --jobs value.
 
+    --progress adds a live bar (stderr) to the build stages, following
+    sumtag's conventions: opt-in, appears once a stage has run 2 seconds,
+    redrawn in place, cleared on completion, suppressed when stderr is not a
+    terminal. The denominator is known a priori -- N files for --index,
+    N*(N-1)/2 comparisons for --pairs.
+
 Caveats: derived tables go stale when sumtag rescans (rerun the pipeline);
 dir_files references files.rowid, which VACUUM can renumber -- both fine for
 artifacts rebuilt in one command each.
@@ -96,10 +103,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sqlite3
 import sys
+import time
 from collections import Counter
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 DEFAULT_FN = "name-score"
@@ -154,6 +163,97 @@ def _get_meta(conn: sqlite3.Connection, artifact: str):
         (artifact,)).fetchone()
 
 
+# --- Progress bar --------------------------------------------------------------
+#
+# Follows sumtag's --progress conventions (CLAUDE.md): explicit opt-in flag,
+# stderr only, appears once the stage has been running 2 seconds, redrawn in
+# place a few times a second, cleared the moment the stage completes, and
+# suppressed outright when stderr is not a terminal. Unlike sumtag's
+# within-file bar the unit is work items, not bytes -- and the total is known
+# a priori: N files for --index, N*(N-1)/2 comparisons for --pairs.
+
+_TRIGGER_S = 2.0    # bar appears once a stage has run this long
+_REDRAW_S = 0.25    # ...and then redraws at most this often
+
+
+def _human_count(n: float) -> str:
+    if n >= 1e9:
+        return f"{n / 1e9:.2f}G"
+    if n >= 1e6:
+        return f"{n / 1e6:.2f}M"
+    if n >= 1e3:
+        return f"{n / 1e3:.1f}k"
+    return f"{n:.0f}"
+
+
+def _human_eta(secs: float) -> str:
+    """Compact duration (45s, 5m12s, 1h05m) -- an estimate, so deliberately
+    styled unlike elapsed's clock format, same as sumtag's ETA field."""
+    secs = int(secs)
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m{secs % 60:02d}s"
+    return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+
+
+class Progress:
+    """A single build stage's bar: construct with the known total, add() as
+    work completes, finish() to clear. Inert unless enabled AND stderr is a
+    terminal, so callers never need to guard their add() calls."""
+
+    def __init__(self, total: int, unit: str, enabled: bool):
+        self.total = total
+        self.unit = unit
+        self.enabled = enabled and sys.stderr.isatty() and total > 0
+        self.done = 0
+        self._t0 = time.monotonic()
+        self._next_draw = self._t0 + _TRIGGER_S
+        self._drawn = 0             # width of whatever is on screen now
+
+    def add(self, n: int) -> None:
+        self.done += n
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        if now < self._next_draw:
+            return
+        self._next_draw = now + _REDRAW_S
+        self._draw(now)
+
+    def _draw(self, now: float) -> None:
+        elapsed = now - self._t0
+        frac = min(self.done / self.total, 1.0)
+        rate = self.done / elapsed if elapsed > 0 else 0.0
+        eta = _human_eta((self.total - self.done) / rate) \
+            if rate > 0 and self.done < self.total else "0s"
+        left = (f"{_human_count(self.done):>7}/{_human_count(self.total)} "
+                f"{self.unit}  {_human_count(rate):>7}/s  [")
+        h, rem = divmod(int(elapsed), 3600)
+        m, s = divmod(rem, 60)
+        right = f"] {int(frac * 100):>3}%  {h}:{m:02d}:{s:02d}  ETA {eta:<7}"
+        # Re-measured each redraw, so the bar tracks a resized terminal
+        # without any SIGWINCH machinery (cheap at a few redraws per second).
+        cols = shutil.get_terminal_size((80, 24)).columns
+        bar_w = max(cols - len(left) - len(right) - 1, 5)
+        filled = int(bar_w * frac)
+        bar = "=" * filled + (">" if filled < bar_w else "") \
+            + " " * (bar_w - filled - 1)
+        line = left + bar + right
+        pad = " " * max(self._drawn - len(line), 0)
+        sys.stderr.write("\r" + line + pad)
+        sys.stderr.flush()
+        self._drawn = len(line)
+
+    def finish(self) -> None:
+        """Clear the bar (if one was ever drawn) so normal output isn't
+        garbled; also called on error paths, hence the callers' try/finally."""
+        if self._drawn:
+            sys.stderr.write("\r" + " " * self._drawn + "\r")
+            sys.stderr.flush()
+            self._drawn = 0
+
+
 # --- Directory index (stage 1) -----------------------------------------------
 
 DIR_INDEX_SQL = """
@@ -178,7 +278,7 @@ CREATE INDEX idx_dir_files_dir ON dir_files(dir_id);
 """
 
 
-def build_dir_index(conn: sqlite3.Connection) -> None:
+def build_dir_index(conn: sqlite3.Connection, progress: bool = False) -> None:
     """(Re)build dirs/dir_files from the files table (a full drop-and-rebuild)."""
     if not _table_exists(conn, "files"):
         raise LookupError("not a sumtag database (no files table)")
@@ -186,17 +286,23 @@ def build_dir_index(conn: sqlite3.Connection) -> None:
     dir_ids: dict[tuple[int, str], int] = {}
     files = conn.execute(
         "SELECT rowid, mountpoint_id, rel_path FROM files").fetchall()
-    for f in files:
-        key = (f["mountpoint_id"], os.path.dirname(f["rel_path"]))
-        dir_id = dir_ids.get(key)
-        if dir_id is None:
-            cur = conn.execute(
-                "INSERT INTO dirs(mountpoint_id, rel_path) VALUES (?, ?)", key)
-            dir_id = cur.lastrowid
-            dir_ids[key] = dir_id
-        conn.execute(
-            "INSERT INTO dir_files(file_id, dir_id) VALUES (?, ?)",
-            (f["rowid"], dir_id))
+    bar = Progress(len(files), "files", progress)
+    try:
+        for f in files:
+            key = (f["mountpoint_id"], os.path.dirname(f["rel_path"]))
+            dir_id = dir_ids.get(key)
+            if dir_id is None:
+                cur = conn.execute(
+                    "INSERT INTO dirs(mountpoint_id, rel_path) VALUES (?, ?)",
+                    key)
+                dir_id = cur.lastrowid
+                dir_ids[key] = dir_id
+            conn.execute(
+                "INSERT INTO dir_files(file_id, dir_id) VALUES (?, ?)",
+                (f["rowid"], dir_id))
+            bar.add(1)
+    finally:
+        bar.finish()
     conn.commit()
 
 
@@ -459,7 +565,8 @@ def _score_stripe(outer: range) -> list:
     return out
 
 
-def build_pairs(conn: sqlite3.Connection, fn_name: str, jobs: int = 1) -> None:
+def build_pairs(conn: sqlite3.Connection, fn_name: str, jobs: int = 1,
+                progress: bool = False) -> None:
     """Compare every directory to every other; store all nonzero pairs.
 
     The N^2/2 comparisons are the expensive part, so every similarity > 0 is
@@ -473,9 +580,11 @@ def build_pairs(conn: sqlite3.Connection, fn_name: str, jobs: int = 1) -> None:
     database write happens here in the parent (SQLite has one writer). The
     outer loop is triangular (row 0 scores N-1 pairs, the last row none), so
     workers take interleaved stripes of it -- rows k, k+S, k+2S... -- and
-    each gets an even mix of long and short rows. Insertion order varies
-    with `jobs`, but the pair set is identical, and the grouping walk orders
-    by its own index, so groups are unaffected.
+    each gets an even mix of long and short rows. Stripes are inserted as
+    they complete, so insertion order varies run to run, but the pair set is
+    identical, and the grouping walk orders by its own index, so groups are
+    unaffected. Each stripe's comparison count is known up front, which is
+    what drives the `progress` bar's a-priori total of N*(N-1)/2.
     """
     if not _table_exists(conn, "dirs"):
         raise LookupError("directory index missing; run --index first")
@@ -493,17 +602,29 @@ def build_pairs(conn: sqlite3.Connection, fn_name: str, jobs: int = 1) -> None:
     n = len(ids)
 
     conn.executescript(PAIRS_SQL)
-    if jobs > 1 and n * (n - 1) // 2 >= 500_000:
-        # Below ~half a million pairs the serial loop beats process startup.
-        n_stripes = jobs * 4
-        stripes = [range(k, n, n_stripes) for k in range(n_stripes)]
-        with ProcessPoolExecutor(max_workers=jobs, initializer=_pairs_init,
-                                 initargs=(sigs, ids, fn_name)) as ex:
-            for rows in ex.map(_score_stripe, stripes):
-                conn.executemany(INSERT_PAIR_SQL, rows)
-    else:
-        for i in range(n):
-            conn.executemany(INSERT_PAIR_SQL, _score_one(ids, sigs, score, i))
+    bar = Progress(n * (n - 1) // 2, "pairs", progress)
+    try:
+        if jobs > 1 and n * (n - 1) // 2 >= 500_000:
+            # Below ~half a million pairs the serial loop beats process
+            # startup. 8 stripes per worker: interleaving balances better and
+            # the bar advances more smoothly, at no measurable stripe cost.
+            n_stripes = jobs * 8
+            stripes = [range(k, n, n_stripes) for k in range(n_stripes)]
+            with ProcessPoolExecutor(max_workers=jobs,
+                                     initializer=_pairs_init,
+                                     initargs=(sigs, ids, fn_name)) as ex:
+                futs = {ex.submit(_score_stripe, st):
+                        sum(n - 1 - i for i in st) for st in stripes}
+                for fut in as_completed(futs):
+                    conn.executemany(INSERT_PAIR_SQL, fut.result())
+                    bar.add(futs[fut])
+        else:
+            for i in range(n):
+                conn.executemany(INSERT_PAIR_SQL,
+                                 _score_one(ids, sigs, score, i))
+                bar.add(n - 1 - i)
+    finally:
+        bar.finish()
     _set_meta(conn, "pairs", fn_name, None)
     conn.commit()
 
@@ -766,6 +887,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="worker processes for --pairs scoring "
                              "(default: all CPUs); 1 disables "
                              "multiprocessing")
+    parser.add_argument("--progress", action="store_true",
+                        help="live progress bar on stderr for the build "
+                             "stages (--index/--pairs): appears once a stage "
+                             "has run 2s, cleared when done; suppressed when "
+                             "stderr is not a terminal")
     parser.add_argument("--ls", metavar="DIR",
                         help="list the files in DIR (absolute or "
                              "mount-relative) using the directory index")
@@ -800,9 +926,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         try:
             if args.index:
-                build_dir_index(conn)
+                build_dir_index(conn, progress=args.progress)
             if args.pairs:
-                build_pairs(conn, args.fn or DEFAULT_FN, jobs=args.jobs)
+                build_pairs(conn, args.fn or DEFAULT_FN, jobs=args.jobs,
+                            progress=args.progress)
             if args.threshold is not None \
                     and not grouping_current(conn, args.threshold, args.fn):
                 build_groups(conn, args.threshold, args.fn)
