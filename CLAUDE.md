@@ -239,6 +239,26 @@ There is no mtime comparison and nothing is computed: a file either has a `user.
 
 **Conflicts:** `--remove` + `--database` is an error — `--remove` only ever touches the xattr, never the database, so there is nothing for a database flag to do — and `--remove` + `--sum`/`--import`/`--locate` likewise (one run, one mode). `--remove` + `--verify` is an error (one reads and compares, the other deletes; they cannot both be the run's mode). `--remove` + `--force` is an error — `--force` overrides a re-hash *decision*, and `--remove` has no decision to override, it always removes whatever is present. `--remove` + `-n` is allowed and is the intended way to preview what would be removed before doing it.
 
+## Experimental companion programs
+
+Repo-root scripts that sit *outside* the installed `sumtag` package. They are the "higher-level tooling" playground CLAUDE.md keeps pointing at: they consume the sumtag database and never touch xattrs or file contents. Experimental status does not exempt a program from being documented here.
+
+### grouper.py
+
+`grouper.py` explores intent #2: it finds **groups of directories whose contents are identical or nearly so** (e.g. two slightly different versions of the same project) in a sumtag SQLite database. It reads sumtag's `files`/`mountpoints` tables and owns its derived tables inside the same database file (`dirs`/`dir_files` — the directory index; `dir_pairs` — pairwise similarity; `groups`/`group_dirs` — the persisted partition; `grouper_meta` — provenance for each built artifact).
+
+The pipeline is three explicit stages, each persisted so later stages are cheap to re-run:
+
+1. **`--index`** — distill `files.rel_path` into the distinct directories that directly contain at least one stamped file (direct children only, deliberately: a directory's own file listing is its signature).
+2. **`--pairs`** — compare every directory to every other with one named comparison function (`--fn`; default `name-score`) and store **all** nonzero similarities. The N²/2 comparison is the expensive part, so the threshold is deliberately *not* applied here — regrouping at a different threshold recomputes nothing.
+3. **`--threshold X`** — walk stored pairs best-first, partition directories into groups (one placement decision per directory, no merging, ever — the partition is enforced by `group_dirs`' primary key), persist, and report. Skipped when the stored grouping is already current.
+
+`--prep` = stages 1+2; a bare `grouper.py --database DB` prints the stored grouping. Inspection helpers: `--ls DIR`, `--compare A B`, `--dups`, `--top [N]`. Comparison functions are pure functions of two file-lists, registered by name in `COMPARISONS` (`digest` — content only, renames free; `name-digest` — all-or-nothing per (name, digest); `name-score` — name-anchored partial credit: 1 point for a shared basename, +2 if the digests also agree). Caveats: derived tables go stale when sumtag rescans (rerun the pipeline), and `dir_files` references `files.rowid`, which `VACUUM` can renumber — both acceptable for artifacts rebuilt in one command.
+
+### query (planned)
+
+A companion query program has been discussed but no code exists in the repo yet; this heading is the placeholder so it gets documented the moment it lands.
+
 ## Future work (designed-for, not built)
 
 These are deliberately deferred; the formats above are shaped now so adding them later is additive, not a migration.
@@ -247,7 +267,7 @@ These are deliberately deferred; the formats above are shaped now so adding them
 - **Alternate digest algorithms** (e.g. `md5`) — selectable via a future `--digest` flag (default `xxh3`). Stored in the `digests` map (one entry at a time, replaced on re-hash — see "Digest container" and "Re-hashing logic"); DB columns are already generic (`algo`/`digest`). Switching the active algorithm never forces a re-hash of already-current files by itself (freshness is algorithm-agnostic); use `--force` to deliberately re-stamp an archive under a new algorithm.
 - **Network database backends** — MySQL/MariaDB and Postgres via `--database=scheme://…`. The value grammar and `open_store()`/`Store` seam are fixed now; only SQLite is implemented.
 - **`runs` table** — normalize the repeated `run_started_at` (see Database storage).
-- **Stale-row pruning**, **duplicate detection**, and **richer audit tooling** (aggregate reporting, scheduled scrubs, quarantine, repair-from-replica) — higher-level tooling, outside sumtag's single-purpose scope. Note: basic single-pass verification *is* built in (`--verify`); what stays out is everything that aggregates or acts on the results. Whatever builds duplicate detection on top of the database should account for the mixed-algorithm hazard noted in Database storage's Schema section — e.g. by scanning the candidate file sets for more than one `algo` value before comparing, warning about the apples-to-oranges risk, and confirming before proceeding (with a non-interactive override for scripted use, since this guidance is for a separate tool and doesn't bind sumtag's own no-prompts CLI).
+- **Stale-row pruning**, **duplicate detection**, and **richer audit tooling** (aggregate reporting, scheduled scrubs, quarantine, repair-from-replica) — higher-level tooling, outside sumtag's single-purpose scope (`grouper.py` is the experimental playground for this — see Experimental companion programs). Note: basic single-pass verification *is* built in (`--verify`); what stays out is everything that aggregates or acts on the results. Whatever builds duplicate detection on top of the database should account for the mixed-algorithm hazard noted in Database storage's Schema section — e.g. by scanning the candidate file sets for more than one `algo` value before comparing, warning about the apples-to-oranges risk, and confirming before proceeding (with a non-interactive override for scripted use, since this guidance is for a separate tool and doesn't bind sumtag's own no-prompts CLI).
 
 ## Platform targets
 
