@@ -9,12 +9,13 @@ versions of the same project from slightly different times. Grouping is the
 default act; everything else is a preparation stage or an inspection helper.
 
 Usage (pipeline order):
-    grouper.py --database DB --prep [--fn N]  # stages 1+2: build the directory
+    grouper.py --database DB --prep [--fn N] [--jobs N]
+                                              # stages 1+2: build the directory
                                               #   index, then compare every
                                               #   directory to every other and
                                               #   store the pairs
     grouper.py --database DB --index          # stage 1 alone
-    grouper.py --database DB --pairs [--fn N] # stage 2 alone
+    grouper.py --database DB --pairs [--fn N] [--jobs N]  # stage 2 alone
     grouper.py --database DB --threshold 0.7  # stage 3: build + persist groups
                                               #   (skipped if the stored grouping
                                               #   is already current), then
@@ -73,10 +74,18 @@ Comparison functions:
 
     A comparison function scores two directories' contents from 0.0 (nothing
     in common) to 1.0 (identical), consistently for the same directories in
-    the same database. They are registered by name in COMPARISONS and swapped
-    with --fn to subtly change how grouping behaves. The core functions take
-    two file-lists (the path resolution happens once, in shared plumbing --
-    --pairs calls these N^2/2 times). See each function for its semantics.
+    the same database. Each is registered by name in COMPARISONS as a
+    (signature, score) pair, swapped with --fn to subtly change how grouping
+    behaves. signature(files) distills one directory's file-list into
+    whatever the scorer consumes -- built once per directory, because the
+    pair loop scores N^2/2 times and rebuilding it per pair dominated the
+    whole phase (measured 2026-07-15: ~16x). score(sig_a, sig_b) is the
+    pairwise math. Both are pure functions, so determinism comes free.
+
+    --pairs distributes the scoring across --jobs worker processes (default:
+    all CPUs). Signatures are plain picklable values shipped once per worker;
+    all database writes stay in the parent (SQLite has one writer). The pair
+    set produced is identical at any --jobs value.
 
 Caveats: derived tables go stale when sumtag rescans (rerun the pipeline);
 dir_files references files.rowid, which VACUUM can renumber -- both fine for
@@ -90,6 +99,7 @@ import os
 import sqlite3
 import sys
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 
 DEFAULT_FN = "name-score"
@@ -255,47 +265,48 @@ def ls(conn: sqlite3.Connection, path: str) -> int:
 # --- Comparison functions ----------------------------------------------------
 #
 # A *comparison function* scores how similar two directories' contents are:
-# 0.0 = nothing in common, 1.0 = identical. Each function may weigh whatever
-# it likes, but must be consistent for the same directories in the same
-# database -- they are pure functions of the two file-lists, so determinism
-# comes free. Registered by name in COMPARISONS; swapped with --fn.
+# 0.0 = nothing in common, 1.0 = identical. Each is a (signature, score)
+# pair: signature(files) distills one directory's file-list into the value
+# the scorer consumes, built once per directory; score(sig_a, sig_b) does the
+# pairwise math, called N^2/2 times by --pairs. Each function may weigh
+# whatever it likes, but must be consistent for the same directories in the
+# same database -- both halves are pure, so determinism comes free.
+# Signatures must be plain picklable values (dicts/Counters of str tuples,
+# never sqlite3.Row), since --jobs ships them to worker processes.
+# Registered by name in COMPARISONS; swapped with --fn.
+
+def sig_digest(files) -> Counter:
+    """Signature: multiset of (algo, digest) -- content only, names ignored.
+
+    Digests only compare within one algorithm (the mixed-algorithm hazard,
+    CLAUDE.md Database storage), so the tuples carry algo alongside digest.
+    """
+    return Counter((r["algo"], r["digest"]) for r in files)
+
+
+def sig_name_digest(files) -> Counter:
+    """Signature: multiset of (basename, algo, digest) -- renames count against.
+
+    All-or-nothing per file: a byte-identical file under a different name
+    matches nothing here.
+    """
+    return Counter((os.path.basename(r["rel_path"]), r["algo"], r["digest"])
+                   for r in files)
+
 
 def _multiset_jaccard(a: Counter, b: Counter) -> float:
     """Jaccard similarity on multisets: |A & B| / |A | B|, empty-vs-empty = 1.0.
 
     Multisets rather than sets so repetition counts: a directory holding two
     copies of the same content is not identical to one holding a single copy.
+    A fully renamed copy still scores 1.0 under sig_digest -- filenames were
+    never in its signature.
     """
     if not a and not b:
         return 1.0  # two empty directories have identical (empty) contents
     inter = sum((a & b).values())
     union = sum((a | b).values())
     return inter / union
-
-
-def cmp_digest(files_a, files_b) -> float:
-    """Similarity = content overlap only: multiset Jaccard over (algo, digest).
-
-    Filenames are ignored entirely -- a fully renamed copy still scores 1.0.
-    Digests only compare within one algorithm (the mixed-algorithm hazard,
-    CLAUDE.md Database storage), so the tuples carry algo alongside digest.
-    """
-    a = Counter((r["algo"], r["digest"]) for r in files_a)
-    b = Counter((r["algo"], r["digest"]) for r in files_b)
-    return _multiset_jaccard(a, b)
-
-
-def cmp_name_digest(files_a, files_b) -> float:
-    """Similarity over (basename, algo, digest): renames count against it.
-
-    All-or-nothing per file: a byte-identical file under a different name
-    matches nothing here.
-    """
-    a = Counter((os.path.basename(r["rel_path"]), r["algo"], r["digest"])
-                for r in files_a)
-    b = Counter((os.path.basename(r["rel_path"]), r["algo"], r["digest"])
-                for r in files_b)
-    return _multiset_jaccard(a, b)
 
 
 # --- Name-anchored scoring ---------------------------------------------------
@@ -342,43 +353,46 @@ MAX_SCORES = {
 }
 
 
-def make_cmp_name_score(max_fn):
-    """Build a name-anchored comparison function around one max-score function."""
-    def cmp(files_a, files_b) -> float:
-        a = {os.path.basename(r["rel_path"]): (r["algo"], r["digest"])
-             for r in files_a}
-        b = {os.path.basename(r["rel_path"]): (r["algo"], r["digest"])
-             for r in files_b}
-        matched = set(a) & set(b)
-        score = 0
+def sig_names(files) -> dict:
+    """Signature: basename -> (algo, digest); basenames are unique in a dir."""
+    return {os.path.basename(r["rel_path"]): (r["algo"], r["digest"])
+            for r in files}
+
+
+def make_name_score(max_fn):
+    """Build a name-anchored scorer (over sig_names) around one max-score fn."""
+    def score(a: dict, b: dict) -> float:
+        matched = a.keys() & b.keys()
+        points = len(matched)          # 1 point per shared basename
         for name in matched:
-            score += 1
             # Tuple equality requires same algo AND digest: a pair stamped
             # under different algorithms is incomparable, so it earns the
             # name point only -- we never guess about content.
             if a[name] == b[name]:
-                score += 2
+                points += 2
         denom = max_fn(len(a), len(b), len(matched))
         if denom == 0:
             return 1.0  # two empty directories have identical (empty) contents
-        return score / denom
-    return cmp
+        return points / denom
+    return score
 
 
 COMPARISONS = {
-    "digest": cmp_digest,           # content only; renames don't matter
-    "name-digest": cmp_name_digest, # content + filename; renames penalized
+    # content only; renames don't matter
+    "digest": (sig_digest, _multiset_jaccard),
+    # content + filename; renames penalized
+    "name-digest": (sig_name_digest, _multiset_jaccard),
     # Name-anchored partial-credit scoring; swap the MAX_SCORES ingredient to
     # register a denominator variant, e.g.:
-    #   "name-score-min": make_cmp_name_score(max_smaller),
-    "name-score": make_cmp_name_score(max_identical),
+    #   "name-score-min": (sig_names, make_name_score(max_smaller)),
+    "name-score": (sig_names, make_name_score(max_identical)),
 }
 
 
 def compare(conn: sqlite3.Connection, path_a: str, path_b: str,
             fn_name: str) -> int:
     """CLI wrapper: resolve two directory paths, score them, print similarity."""
-    fn = COMPARISONS[fn_name]
+    make_sig, score = COMPARISONS[fn_name]
     sides = []
     for path in (path_a, path_b):
         d = resolve_dir(conn, path)
@@ -386,8 +400,8 @@ def compare(conn: sqlite3.Connection, path_a: str, path_b: str,
             print(f"grouper: directory not in index: {path} (run --index?)",
                   file=sys.stderr)
             return 1
-        sides.append(_dir_files(conn, d["id"]))
-    print(f"{fn(sides[0], sides[1]):.4f}")
+        sides.append(make_sig(_dir_files(conn, d["id"])))
+    print(f"{score(sides[0], sides[1]):.4f}")
     return 0
 
 
@@ -408,7 +422,44 @@ CREATE INDEX idx_dir_pairs_walk ON dir_pairs(similarity DESC, dir_a, dir_b);
 """
 
 
-def build_pairs(conn: sqlite3.Connection, fn_name: str) -> None:
+INSERT_PAIR_SQL = \
+    "INSERT INTO dir_pairs(dir_a, dir_b, similarity) VALUES (?, ?, ?)"
+
+# Worker-process state, installed by _pairs_init. The signature table is
+# shipped (pickled) once per worker via the pool initializer, not once per
+# task -- macOS spawns rather than forks, so per-task shipping would drown
+# the scoring. The scorer is re-resolved from COMPARISONS by name because
+# name-score is a closure, and closures don't pickle.
+_SIGS: dict | None = None
+_IDS: list | None = None
+_SCORE = None
+
+
+def _pairs_init(sigs: dict, ids: list, fn_name: str) -> None:
+    global _SIGS, _IDS, _SCORE
+    _SIGS, _IDS, _SCORE = sigs, ids, COMPARISONS[fn_name][1]
+
+
+def _score_one(ids: list, sigs: dict, score, i: int) -> list:
+    """All nonzero pairs of ids[i] against every later dir -- one outer row."""
+    a = ids[i]
+    sig_a = sigs[a]
+    out = []
+    for b in ids[i + 1:]:
+        s = score(sig_a, sigs[b])
+        if s > 0.0:
+            out.append((a, b, s))
+    return out
+
+
+def _score_stripe(outer: range) -> list:
+    out = []
+    for i in outer:
+        out.extend(_score_one(_IDS, _SIGS, _SCORE, i))
+    return out
+
+
+def build_pairs(conn: sqlite3.Connection, fn_name: str, jobs: int = 1) -> None:
     """Compare every directory to every other; store all nonzero pairs.
 
     The N^2/2 comparisons are the expensive part, so every similarity > 0 is
@@ -416,10 +467,19 @@ def build_pairs(conn: sqlite3.Connection, fn_name: str) -> None:
     grouping time. Zero-similarity pairs are omitted: they can never form or
     join a group, so their rows would buy nothing (and on real corpora they
     are the overwhelming majority).
+
+    Each directory's signature is built exactly once, then the scoring loop
+    fans out across `jobs` worker processes. Workers only score; every
+    database write happens here in the parent (SQLite has one writer). The
+    outer loop is triangular (row 0 scores N-1 pairs, the last row none), so
+    workers take interleaved stripes of it -- rows k, k+S, k+2S... -- and
+    each gets an even mix of long and short rows. Insertion order varies
+    with `jobs`, but the pair set is identical, and the grouping walk orders
+    by its own index, so groups are unaffected.
     """
     if not _table_exists(conn, "dirs"):
         raise LookupError("directory index missing; run --index first")
-    fn = COMPARISONS[fn_name]
+    make_sig, score = COMPARISONS[fn_name]
     contents: dict[int, list[sqlite3.Row]] = {}
     for r in conn.execute(
             """
@@ -427,19 +487,23 @@ def build_pairs(conn: sqlite3.Connection, fn_name: str) -> None:
               FROM files f JOIN dir_files df ON df.file_id = f.rowid
             """):
         contents.setdefault(r["dir_id"], []).append(r)
+    sigs = {d: make_sig(files) for d, files in contents.items()}
+    del contents
+    ids = sorted(sigs)
+    n = len(ids)
 
     conn.executescript(PAIRS_SQL)
-    ids = sorted(contents)
-    rows = []
-    for i, a in enumerate(ids):
-        files_a = contents[a]
-        for b in ids[i + 1:]:
-            s = fn(files_a, contents[b])
-            if s > 0.0:
-                rows.append((a, b, s))
-    conn.executemany(
-        "INSERT INTO dir_pairs(dir_a, dir_b, similarity) VALUES (?, ?, ?)",
-        rows)
+    if jobs > 1 and n * (n - 1) // 2 >= 500_000:
+        # Below ~half a million pairs the serial loop beats process startup.
+        n_stripes = jobs * 4
+        stripes = [range(k, n, n_stripes) for k in range(n_stripes)]
+        with ProcessPoolExecutor(max_workers=jobs, initializer=_pairs_init,
+                                 initargs=(sigs, ids, fn_name)) as ex:
+            for rows in ex.map(_score_stripe, stripes):
+                conn.executemany(INSERT_PAIR_SQL, rows)
+    else:
+        for i in range(n):
+            conn.executemany(INSERT_PAIR_SQL, _score_one(ids, sigs, score, i))
     _set_meta(conn, "pairs", fn_name, None)
     conn.commit()
 
@@ -697,6 +761,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fn", choices=sorted(COMPARISONS),
                         help=f"comparison function for --pairs/--compare "
                              f"(default: {DEFAULT_FN})")
+    parser.add_argument("--jobs", type=int, metavar="N",
+                        default=os.cpu_count() or 1,
+                        help="worker processes for --pairs scoring "
+                             "(default: all CPUs); 1 disables "
+                             "multiprocessing")
     parser.add_argument("--ls", metavar="DIR",
                         help="list the files in DIR (absolute or "
                              "mount-relative) using the directory index")
@@ -716,6 +785,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.threshold is not None and not 0.0 <= args.threshold <= 1.0:
         parser.error("--threshold must be between 0.0 and 1.0")
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
     if args.dups and args.top is not None:
         parser.error("--dups and --top are mutually exclusive")
     if args.top is not None and args.top < 1:
@@ -731,7 +802,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.index:
                 build_dir_index(conn)
             if args.pairs:
-                build_pairs(conn, args.fn or DEFAULT_FN)
+                build_pairs(conn, args.fn or DEFAULT_FN, jobs=args.jobs)
             if args.threshold is not None \
                     and not grouping_current(conn, args.threshold, args.fn):
                 build_groups(conn, args.threshold, args.fn)
