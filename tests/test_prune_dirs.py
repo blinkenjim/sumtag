@@ -174,5 +174,90 @@ class PruneDirsFlowTests(unittest.TestCase):
         self.assertIn("scanned:", out)
 
 
+class PruneAllTests(unittest.TestCase):
+    """--prune-all: the directory pass plus per-file staleness."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tree = os.path.join(self._tmp.name, "tree")
+        self.db = os.path.join(self._tmp.name, "db.sqlite")
+        _make_tree(self.tree, {
+            "keep/a.bin": 10, "keep/b.bin": 10,
+            "gone/c.bin": 10,
+        })
+        code, _, _ = _run(["--sum", "-q", "--database", self.db, self.tree])
+        self.assertEqual(code, 0)
+
+    def test_counts_as_the_required_action_and_requires_database(self):
+        with self.assertRaises(SystemExit):
+            _run(["--prune-all", self.tree])
+        code, _, err = _run(["--prune-all", "--database", "/nonexistent.db",
+                             self.tree])
+        self.assertEqual(code, 2)
+        self.assertIn("no such database", err)
+
+    def test_conflicts_match_prune_dirs(self):
+        for extra in (["--sum"], ["--verify"], ["--remove"], ["--force"],
+                      ["--prescan"], ["--exclude", "*.vob"], ["--no-ignore"]):
+            with self.assertRaises(SystemExit, msg=f"expected error: {extra}"):
+                _run(["--prune-all", "--database", "x"] + extra + [self.tree])
+
+    def test_redundant_with_prune_dirs_is_allowed(self):
+        code, _, _ = _run(["--prune-all", "--prune-dirs", "-q",
+                           "--database", self.db, self.tree])
+        self.assertEqual(code, 0)
+
+    def test_deleted_file_in_surviving_dir_is_pruned(self):
+        # The exact case --prune-dirs deliberately misses.
+        os.unlink(os.path.join(self.tree, "keep", "a.bin"))
+        code, out, _ = _run(["--prune-dirs", "-q", "--database", self.db,
+                             self.tree])
+        self.assertEqual(code, 0, "--prune-dirs must not notice it")
+        self.assertEqual(len(_db_rel_paths(self.db)), 3)
+        code, out, _ = _run(["--prune-all", "--database", self.db,
+                             self.tree])
+        self.assertEqual(code, 1)
+        rels = _db_rel_paths(self.db)
+        self.assertEqual(len(rels), 2)
+        self.assertFalse(any(r.endswith("a.bin") for r in rels))
+        self.assertTrue(any(r.endswith("b.bin") for r in rels))
+        self.assertIn("0 directories, 1 file row", out)
+
+    def test_deleted_dir_still_handled_by_the_dir_pass(self):
+        shutil.rmtree(os.path.join(self.tree, "gone"))
+        code, out, _ = _run(["--prune-all", "--database", self.db,
+                             self.tree])
+        self.assertEqual(code, 1)
+        self.assertEqual(len(_db_rel_paths(self.db)), 2)
+        self.assertIn("1 directory, 1 file row", out)
+
+    def test_file_replaced_by_directory_is_pruned(self):
+        path = os.path.join(self.tree, "keep", "a.bin")
+        os.unlink(path)
+        os.mkdir(path)  # same name, no longer a regular file
+        code, _, _ = _run(["--prune-all", "-q", "--database", self.db,
+                           self.tree])
+        self.assertEqual(code, 1)
+        self.assertEqual(len(_db_rel_paths(self.db)), 2)
+
+    def test_dry_run_previews_without_deleting(self):
+        os.unlink(os.path.join(self.tree, "keep", "a.bin"))
+        code, out, _ = _run(["--prune-all", "-n", "-v", "--database", self.db,
+                             self.tree])
+        self.assertEqual(code, 1)
+        self.assertIn("would prune", out)
+        self.assertIn("(file row)", out)
+        self.assertEqual(len(_db_rel_paths(self.db)), 3)
+
+    def test_nothing_stale_is_exit_0_and_summary_counts_files(self):
+        code, out, _ = _run(["--prune-all", "--database", self.db,
+                             self.tree])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(_db_rel_paths(self.db)), 3)
+        self.assertIn("checked:", out)
+        self.assertIn("2 directories, 3 files", out)
+
+
 if __name__ == "__main__":
     unittest.main()

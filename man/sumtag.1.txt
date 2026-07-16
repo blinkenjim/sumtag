@@ -17,9 +17,10 @@ DESCRIPTION
        check offered by --verify.
 
        An explicit action option is required: every run must name what it does
-       with one of --sum, --verify, --remove, --import, --locate, or
-       --prune-dirs.  A bare sumtag DIRECTORY is an error. The plain stamping
-       action is --sum, which works with or without a database (see OPTIONS).
+       with one of --sum, --verify, --remove, --import, --locate,
+       --prune-dirs, or --prune-all.  A bare sumtag DIRECTORY is an error. The
+       plain stamping action is --sum, which works with or without a database
+       (see OPTIONS).
 
        At least one DIRECTORY is also required; there is no current-directory
        default. Any operation that scans a directory requires an explicit
@@ -111,7 +112,8 @@ OPTIONS
               stored relative to the file's mount point so they survive
               remounting at a different location.  --database takes no action
               by itself; it requires at least one of --sum, --import,
-              --locate, or --prune-dirs to say what to do with it.
+              --locate, --prune-dirs, or --prune-all to say what to do with
+              it.
 
        --sum  The stamping action: hash or re-hash each file per the normal
               mtime-based decision (see RE-HASHING ) and write the extended
@@ -225,15 +227,31 @@ OPTIONS
               created by this option. A directory
               deleted from the filesystem but moved elsewhere is pruned at
               its old location like any other deletion; files deleted from a
-              directory that still exists are not noticed. Combined with
-              --dry-run, previews what would be pruned without deleting
-              anything. With --progress, a live nnn/mmm counter reports
-              directories checked against the total known at the start.
-              Requires --database.  Cannot be combined with --sum, --import,
-              --locate, --verify, --remove, --force, --prescan, --db-prescan,
-              --exclude, or --no-ignore (the last two govern filesystem
-              traversal, and this option walks the database, not the
-              filesystem). See EXIT STATUS below.
+              directory that still exists are not noticed (that is
+              --prune-all's job). Combined with --dry-run, previews what
+              would be pruned without deleting anything. With --progress, a
+              live nnn/mmm counter reports directories checked against the
+              total known at the start.  Requires --database.  Cannot be
+              combined with --sum, --import, --locate, --verify, --remove,
+              --force, --prescan, --db-prescan, --exclude, or --no-ignore
+              (the last two govern filesystem traversal, and this option
+              walks the database, not the filesystem). See EXIT STATUS below.
+
+       --prune-all
+              Everything --prune-dirs does, and additionally check every file
+              row in directories that still exist, with one lstat(2) each,
+              deleting the rows of files that no longer exist or are no
+              longer regular files (a path that turned into a directory or
+              symbolic link is not the stamped file). The directory pass runs
+              first, so a vanished directory still costs a single stat(2),
+              never one per resident row; the extra cost over --prune-dirs is
+              one lstat(2) per row in surviving directories only. A moved
+              file is pruned at its old location like any deletion; nothing
+              content-based is checked -- no hashing, ever. Same
+              requirements, conflicts, previews, progress counter (the unit
+              becomes paths: directories plus file rows), and exit status as
+              --prune-dirs; giving both together is redundant but not an
+              error.
 
        --no-ignore
               Disregard all @sumtag-ignore marker files for this run,
@@ -278,7 +296,8 @@ RUN SUMMARY
        cumulative size (headlined hashed, would hash, imported, verified,
        removed, or pruned to match the mode; pruned counts directories and
        file rows, followed by a checked line with the total directories
-       examined), any nonzero skipped, errors, CORRUPT, stale, or
+       examined -- under --prune-all, files too), any nonzero skipped,
+       errors, CORRUPT, stale, or
        unverifiable counts, the database in use (when --database was given),
        and the scanned directories. Byte figures honour --si.
 
@@ -288,8 +307,8 @@ RUN SUMMARY
        (128 + SIGINT, the shell convention).
 
 EXIT STATUS
-       Without --verify or --prune-dirs, sumtag exits 0 on success and
-       non-zero if an error prevented completion.
+       Without --verify, --prune-dirs, or --prune-all, sumtag exits 0 on
+       success and non-zero if an error prevented completion.
 
        With --verify:
 
@@ -299,11 +318,12 @@ EXIT STATUS
 
        2      unreadable files or other errors prevented a complete check.
 
-       With --prune-dirs, the same scheme, applied to staleness: 0 means
-       nothing was stale (the database already matches the filesystem), 1
-       means stale directories were found and pruned (or would be pruned,
-       under --dry-run), and 2 means errors prevented a complete check
-       (including a missing scan root or database).
+       With --prune-dirs or --prune-all, the same scheme, applied to
+       staleness: 0 means nothing was stale (the database already matches the
+       filesystem), 1 means stale directories or file rows were found and
+       pruned (or would be pruned, under --dry-run), and 2 means errors
+       prevented a complete check (including a missing scan root or
+       database).
 
        In any mode, a run interrupted by Ctrl-C exits 130 (see RUN SUMMARY).
 
