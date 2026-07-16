@@ -21,7 +21,10 @@ Usage (pipeline order):
                                               #   (skipped if the stored grouping
                                               #   is already current), then
                                               #   report them
-    grouper.py --database DB                  # THE report: show stored grouping
+    grouper.py --database DB [--sort K]       # THE report: show stored grouping
+                                              #   ordered by K: bond (default,
+                                              #   strongest bonds first), files,
+                                              #   or size (largest group first)
 
     grouper.py --database DB --ls DIR             # inspect one directory
     grouper.py --database DB --compare A B [--fn N]  # similarity of two dirs
@@ -261,6 +264,16 @@ def _human_count(n: float) -> str:
     if n >= 1e3:
         return f"{n / 1e3:.1f}k"
     return f"{n:.0f}"
+
+
+def _human_size(n: int) -> str:
+    """Binary-unit size (1.2GiB), matching sumtag's default display units."""
+    x = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB", "PiB"):
+        if x < 1024 or unit == "PiB":
+            return f"{x:.0f}{unit}" if unit == "B" else f"{x:.1f}{unit}"
+        x /= 1024
+    return f"{x:.1f}PiB"
 
 
 def _human_eta(secs: float) -> str:
@@ -1009,13 +1022,48 @@ def grouping_current(conn: sqlite3.Connection, threshold: float,
     return True
 
 
-def report_groups(conn: sqlite3.Connection) -> int:
-    """The one reporter: print the stored grouping with its provenance."""
+def report_groups(conn: sqlite3.Connection, sort: str = "bond") -> int:
+    """The one reporter: print the stored grouping with its provenance.
+
+    sort chooses the group order: "bond" (default) is creation order --
+    strongest bonds first, the order the grouping walk minted group ids;
+    "files" and "size" order by each group's total stamped-file count or
+    byte size (descending), aggregated over its member directories.
+    """
     gmeta = _get_meta(conn, "groups")
     if gmeta is None or not _table_exists(conn, "group_dirs"):
         print("grouper: no stored grouping; run --pairs, then --threshold X",
               file=sys.stderr)
         return 1
+
+    # Group weight for the stat sorts: total stamped files and bytes across
+    # each group's member directories (direct children, same as the index).
+    # Sizes come from the nullable, --locate-populated files.size column --
+    # checked before any report line prints, so a refusal is a clean refusal.
+    stats: dict[int, sqlite3.Row] = {}
+    if sort in ("files", "size"):
+        stats = {r["group_id"]: r for r in conn.execute(
+            """
+            SELECT gd.group_id AS group_id,
+                   COUNT(df.file_id) AS n_files,
+                   COALESCE(SUM(f.size), 0) AS total_size,
+                   SUM(f.size IS NULL) AS unsized
+              FROM group_dirs gd
+              JOIN dir_files df ON df.dir_id = gd.dir_id
+              JOIN files f ON f.rowid = df.file_id
+          GROUP BY gd.group_id
+            """)}
+        unsized = sum(r["unsized"] for r in stats.values())
+        if sort == "size" and unsized:
+            n_total = sum(r["n_files"] for r in stats.values())
+            if unsized == n_total:
+                print("grouper: no stored file sizes to sort by; run "
+                      "sumtag --locate --database ... first", file=sys.stderr)
+                return 1
+            print(f"note: {unsized} of {n_total} files have no stored size "
+                  "(a sumtag --locate run fills it); size totals undercount",
+                  file=sys.stderr)
+
     print(f"grouping: fn={gmeta['fn']}  threshold={gmeta['threshold']:g}  "
           f"built {gmeta['built_at']}")
     pmeta = _get_meta(conn, "pairs")
@@ -1051,10 +1099,24 @@ def report_groups(conn: sqlite3.Connection) -> int:
             else r["mount"]
         by_gid.setdefault(r["group_id"], []).append(path)
 
-    for gid in sorted(by_gid):           # creation order: strongest bonds first
+    def _stat(gid: int, col: str) -> int:
+        return stats[gid][col] if gid in stats else 0
+
+    if sort == "files":
+        order = sorted(by_gid, key=lambda g: (-_stat(g, "n_files"), g))
+    elif sort == "size":
+        order = sorted(by_gid, key=lambda g: (-_stat(g, "total_size"), g))
+    else:
+        order = sorted(by_gid)           # creation order: strongest bonds first
+
+    for gid in order:
         members = by_gid[gid]
+        weight = ""
+        if gid in stats:
+            weight = (f", {stats[gid]['n_files']} files"
+                      f", {_human_size(stats[gid]['total_size'])}")
         top = f", best pair {best[gid]:.3f}" if gid in best else ""
-        print(f"\ngroup {gid}  ({len(members)} directories{top})")
+        print(f"\ngroup {gid}  ({len(members)} directories{weight}{top})")
         for path in members:
             print(f"    {path}")
     print(f"\n{len(by_gid)} group(s), {len(rows)} directorie(s)")
@@ -1198,6 +1260,13 @@ def main(argv: list[str] | None = None) -> int:
                              "(0.0-1.0); a later --threshold below X is "
                              "refused. Default 0.0: keep every nonzero "
                              "pair")
+    parser.add_argument("--sort", choices=("bond", "files", "size"),
+                        default="bond",
+                        help="group order for the report: bond (default) = "
+                             "strongest-bonds-first creation order; files / "
+                             "size = total stamped-file count / byte size of "
+                             "each group's directories, largest first (size "
+                             "needs a sumtag --locate run to fill files.size)")
     parser.add_argument("--ls", metavar="DIR",
                         help="list the files in DIR (absolute or "
                              "mount-relative) using the directory index")
@@ -1260,7 +1329,7 @@ def main(argv: list[str] | None = None) -> int:
             report_dups(conn, args.min, top_n=args.top, exclude_empty=True)
             return 0
         if args.threshold is not None or not building:
-            return report_groups(conn)
+            return report_groups(conn, sort=args.sort)
     finally:
         conn.close()
     return 0
