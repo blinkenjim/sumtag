@@ -249,7 +249,7 @@ Repo-root scripts that sit *outside* the installed `sumtag` package. They are th
 
 The pipeline is three explicit stages, each persisted so later stages are cheap to re-run:
 
-1. **`--index`** — distill `files.rel_path` into the distinct directories that directly contain at least one stamped file (direct children only, deliberately: a directory's own file listing is its signature).
+1. **`--index`** — distill `files.rel_path` into the distinct directories that directly contain at least one **visible** stamped file (direct children only, deliberately: a directory's own file listing is its signature). Visible means the basename does not start with `.` — a directory whose direct files are all hidden (`.git` internals and similar junk) is dropped from the index outright (first junk filter, added 2026-07-16; count of dropped directories reported on stderr). The filter decides which *directories* exist, not which files count: a kept directory's hidden files stay in `dir_files` and its signatures.
 2. **`--pairs`** — compare every directory to every other with one named comparison function (`--fn`; default `name-score`) and store **all** nonzero similarities. The N²/2 comparison is the expensive part, so the threshold is deliberately *not* applied here — regrouping at a different threshold recomputes nothing.
 3. **`--threshold X`** — walk stored pairs best-first, partition directories into groups (one placement decision per directory, no merging, ever — the partition is enforced by `group_dirs`' primary key), persist, and report. Skipped when the stored grouping is already current.
 

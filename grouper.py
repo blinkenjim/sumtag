@@ -37,8 +37,10 @@ report, same as the bare invocation. Errors go to stderr with exit 1.
 Data model (grouper-owned derived tables inside the sumtag database):
 
     dirs / dir_files -- the directory index: every files.rel_path distilled to
-        the distinct directories that directly contain at least one stamped
-        file; dir_files maps dir_id -> files.rowid (indexed) so a directory's
+        the distinct directories that directly contain at least one *visible*
+        stamped file (basename not starting with '.'); all-hidden directories
+        are junk, dropped at --index so nothing downstream ever sees them.
+        dir_files maps dir_id -> files.rowid (indexed) so a directory's
         contents are one keyed lookup. Comparisons are direct-children only,
         deliberately -- a directory's own file listing is its signature.
     dir_pairs -- similarity for every pair of directories (dir_a < dir_b),
@@ -366,11 +368,19 @@ CREATE INDEX idx_dir_files_dir ON dir_files(dir_id);
 
 
 def build_dir_index(conn: sqlite3.Connection, progress: bool = False) -> None:
-    """(Re)build dirs/dir_files from the files table (a full drop-and-rebuild)."""
+    """(Re)build dirs/dir_files from the files table (a full drop-and-rebuild).
+
+    Junk filter: a directory whose direct stamped files are all hidden
+    (every basename starts with '.') is dropped from the index entirely --
+    it never reaches --pairs or the grouping. Directories with at least one
+    visible file are kept whole, hidden files included: the filter decides
+    which directories exist, not which files count in their signatures.
+    """
     if not _table_exists(conn, "files"):
         raise LookupError("not a sumtag database (no files table)")
     conn.executescript(DIR_INDEX_SQL)
     dir_ids: dict[tuple[int, str], int] = {}
+    visible: set[int] = set()            # dir ids with >= 1 non-dot file
     files = conn.execute(
         "SELECT rowid, mountpoint_id, rel_path FROM files").fetchall()
     bar = Progress(len(files), "files", progress)
@@ -384,12 +394,20 @@ def build_dir_index(conn: sqlite3.Connection, progress: bool = False) -> None:
                     key)
                 dir_id = cur.lastrowid
                 dir_ids[key] = dir_id
+            if not os.path.basename(f["rel_path"]).startswith("."):
+                visible.add(dir_id)
             conn.execute(
                 "INSERT INTO dir_files(file_id, dir_id) VALUES (?, ?)",
                 (f["rowid"], dir_id))
             bar.add(1)
     finally:
         bar.finish()
+    hidden = [(d,) for d in dir_ids.values() if d not in visible]
+    if hidden:
+        conn.executemany("DELETE FROM dir_files WHERE dir_id = ?", hidden)
+        conn.executemany("DELETE FROM dirs WHERE id = ?", hidden)
+        print(f"grouper: dropped {len(hidden)} directorie(s) with no "
+              "visible files", file=sys.stderr)
     conn.commit()
 
 
