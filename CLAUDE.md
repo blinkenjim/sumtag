@@ -88,6 +88,10 @@ A directory can be exempted from sumtag by placing a marker file named **`@sumta
 - **`--no-ignore` is the intended escape hatch.** It disregards all `@sumtag-ignore` markers for the run, processing everything. This is how you override exemptions — not by weakening `--force`.
 - **A marker on an explicit scan root is honored, with a warning.** If a path passed on the command line contains a top-level `@sumtag-ignore`, sumtag skips it like any other exempted directory but emits a warning to stderr, since silently doing nothing for a run the user explicitly requested would be confusing.
 
+## Symbolic links
+
+Symlinks are **not content** (fixed 2026-07-16). The traversal never yields them, in any mode: a symlink is never hashed, stamped, verified, imported, located, removed, or counted by `--prescan` — silently skipped at the walker level, like every traversal-level exclusion (no output even at `-v`). Before the fix, `os.walk` listed symlinks-to-files among a directory's files and sumtag processed them: a *broken* link surfaced as a spurious per-file error (`--remove` reported "file not found" for links whose target was gone), and a *live* link was stamped **through** the link — the xattr landed on the target, possibly outside the scanned tree. Symlinks to directories were already never descended (`os.walk` default). An explicit scan-root argument that is itself a symlink is still honored — naming it is the user's explicit claim — but nothing encountered *during* traversal is followed.
+
 ## Command-line exclusion (`--exclude`)
 
 `--exclude PATTERN` skips anything whose **basename** matches the glob `PATTERN` (design settled 2026-07-13). It complements `@sumtag-ignore`: the marker fences off a directory by touching the filesystem; `--exclude` does it per-run from the command line, leaving nothing behind.
