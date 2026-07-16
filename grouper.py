@@ -16,7 +16,7 @@ Usage (pipeline order):
                                               #   store the pairs
     grouper.py --database DB --index [--progress]          # stage 1 alone
     grouper.py --database DB --pairs [--fn N] [--jobs N] [--progress]
-                                     [--max-df N]         # stage 2 alone
+                                     [--max-df N] [--min-sim X]  # stage 2 alone
     grouper.py --database DB --threshold 0.7  # stage 3: build + persist groups
                                               #   (skipped if the stored grouping
                                               #   is already current), then
@@ -114,6 +114,25 @@ Candidate nomination (--max-df):
     and the cap is recorded in grouper_meta -- approximation by consent,
     never silently.
 
+Storage floor (--min-sim):
+
+    --pairs stores every nonzero similarity so --threshold stays a free,
+    exploratory knob -- affordable at thousands of directories, ruinous at
+    millions, where the weak tail (pairs scoring 0.01 off a few shared
+    names) dwarfs everything interesting. --min-sim X keeps only pairs
+    scoring >= X: the knob stays free at and above the floor and is sold
+    below it. The floor is recorded in grouper_meta, and a --threshold
+    below the stored floor is refused outright (rerun --pairs with a lower
+    floor) -- never answered silently from an incomplete table. Scores are
+    still computed for every nominated pair; the floor governs what is
+    KEPT, not what is looked at (--max-df governs that). A size-ratio
+    prefilter (skip scoring when the smaller signature couldn't possibly
+    reach the floor against the larger) was considered and declined: the
+    bound holds for the three current comparison functions but not for the
+    commented MAX_SCORES denominator variants, so it would plant a trap in
+    the registry; revisit per-function if scoring cost ever matters again
+    post-nomination.
+
 Progress (--progress):
 
     A live bar (stderr) on the build stages, following sumtag's
@@ -179,12 +198,14 @@ def _now_iso() -> str:
 
 
 def _set_meta(conn: sqlite3.Connection, artifact: str, fn: str,
-              threshold: float | None, max_df: int | None = None) -> None:
+              threshold: float | None, max_df: int | None = None,
+              min_sim: float | None = None) -> None:
     """Record provenance for a built artifact ('pairs' or 'groups').
 
-    max_df is the candidate-nomination cap the pair table was built with;
-    NULL means exhaustive all-pairs. Older databases predate the column, so
-    it is added in place when missing.
+    max_df is the candidate-nomination cap the pair table was built with
+    (NULL = exhaustive all-pairs); min_sim is its storage floor (NULL = all
+    nonzero pairs kept). Older databases predate these columns, so they are
+    added in place when missing.
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS grouper_meta (
@@ -192,18 +213,22 @@ def _set_meta(conn: sqlite3.Connection, artifact: str, fn: str,
           fn        TEXT NOT NULL,
           threshold REAL,              -- NULL for the pair table
           built_at  TEXT NOT NULL,
-          max_df    INTEGER            -- nomination cap; NULL = exhaustive
+          max_df    INTEGER,           -- nomination cap; NULL = exhaustive
+          min_sim   REAL               -- storage floor; NULL = keep nonzero
         )""")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(grouper_meta)")}
-    if "max_df" not in cols:
-        conn.execute("ALTER TABLE grouper_meta ADD COLUMN max_df INTEGER")
+    for col, typ in (("max_df", "INTEGER"), ("min_sim", "REAL")):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE grouper_meta ADD COLUMN {col} {typ}")
     conn.execute("""
-        INSERT INTO grouper_meta(artifact, fn, threshold, built_at, max_df)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO grouper_meta(artifact, fn, threshold, built_at,
+                                 max_df, min_sim)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(artifact) DO UPDATE SET
             fn=excluded.fn, threshold=excluded.threshold,
-            built_at=excluded.built_at, max_df=excluded.max_df
-        """, (artifact, fn, threshold, _now_iso(), max_df))
+            built_at=excluded.built_at, max_df=excluded.max_df,
+            min_sim=excluded.min_sim
+        """, (artifact, fn, threshold, _now_iso(), max_df, min_sim))
 
 
 def _get_meta(conn: sqlite3.Connection, artifact: str):
@@ -660,6 +685,7 @@ _SIGS: dict | None = None
 _IDS: list | None = None
 _SCORE = None
 _INDEX: dict | None = None      # nomination index; None = exhaustive mode
+_FLOOR = 0.0                    # --min-sim storage floor; 0.0 = keep nonzero
 
 
 def _load_signatures(conn: sqlite3.Connection, fn_name: str,
@@ -695,9 +721,10 @@ def _load_signatures(conn: sqlite3.Connection, fn_name: str,
     return sigs
 
 
-def _pairs_init(db_path: str, fn_name: str, max_df: int) -> None:
+def _pairs_init(db_path: str, fn_name: str, max_df: int,
+                min_sim: float) -> None:
     """max_df of 0 means exhaustive mode (no nomination index)."""
-    global _SIGS, _IDS, _SCORE, _INDEX
+    global _SIGS, _IDS, _SCORE, _INDEX, _FLOOR
     conn = connect(db_path)                # read-only; closed after the load
     try:
         _SIGS = _load_signatures(conn, fn_name)
@@ -706,15 +733,18 @@ def _pairs_init(db_path: str, fn_name: str, max_df: int) -> None:
     _IDS = sorted(_SIGS)
     _SCORE = COMPARISONS[fn_name][1]
     _INDEX = _kept_index(_SIGS, max_df) if max_df else None
+    _FLOOR = min_sim
 
 
-def _score_one(sigs: dict, score, a: int, partners) -> list:
-    """All nonzero pairs of dir a against the given later dirs."""
+def _score_one(sigs: dict, score, a: int, partners,
+               floor: float = 0.0) -> list:
+    """Pairs of dir a against the given later dirs scoring >= the floor
+    (and above zero -- the default floor of 0.0 keeps all nonzero)."""
     sig_a = sigs[a]
     out = []
     for b in partners:
         s = score(sig_a, sigs[b])
-        if s > 0.0:
+        if s > 0.0 and s >= floor:
             out.append((a, b, s))
     return out
 
@@ -725,24 +755,27 @@ def _score_stripe(outer: range) -> list:
         a = _IDS[i]
         partners = _IDS[i + 1:] if _INDEX is None \
             else _candidate_partners(_INDEX, _SIGS[a], a)
-        out.extend(_score_one(_SIGS, _SCORE, a, partners))
+        out.extend(_score_one(_SIGS, _SCORE, a, partners, _FLOOR))
     return out
 
 
 def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
                 jobs: int = 1, progress: bool = False,
-                max_df: int | None = None) -> None:
-    """Score directory pairs and store all nonzero similarities.
+                max_df: int | None = None, min_sim: float = 0.0) -> None:
+    """Score directory pairs and store the similarities worth keeping.
 
     Exhaustively (every pair, the N^2/2 loop) on smaller corpora, or via
     candidate nomination above _EXHAUSTIVE_MAX comparisons -- see the module
     docstring's "Candidate nomination" section. max_df: None = auto, 0 =
     force exhaustive, N = force nomination at cap N. The comparisons are
-    the expensive part, so every similarity > 0 is kept regardless of any
-    threshold -- the threshold stays a cheap knob at grouping time.
-    Zero-similarity pairs are omitted: they can never form or join a group,
-    so their rows would buy nothing (and on real corpora they are the
-    overwhelming majority).
+    the expensive part, so by default every similarity > 0 is kept
+    regardless of any threshold -- the threshold stays a cheap knob at
+    grouping time. Zero-similarity pairs are omitted: they can never form
+    or join a group, so their rows would buy nothing (and on real corpora
+    they are the overwhelming majority). min_sim > 0 additionally drops
+    pairs scoring below it at storage time (the module docstring's
+    "Storage floor" section); build_groups refuses a --threshold below the
+    stored floor.
 
     The scoring loop fans out across `jobs` worker processes, each of which
     loads its own signature table from the database (see _pairs_init for why
@@ -812,7 +845,8 @@ def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
             stripes = [range(k, n, n_stripes) for k in range(n_stripes)]
             with ProcessPoolExecutor(max_workers=jobs,
                                      initializer=_pairs_init,
-                                     initargs=(db_path, fn_name, cap)) as ex:
+                                     initargs=(db_path, fn_name, cap,
+                                               min_sim)) as ex:
                 futs = {ex.submit(_score_stripe, st):
                         (len(st) if cap else sum(n - 1 - i for i in st))
                         for st in stripes}
@@ -846,7 +880,7 @@ def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
                 a = ids[i]
                 partners = ids[i + 1:] if index is None \
                     else _candidate_partners(index, sigs[a], a)
-                rows = _score_one(sigs, score, a, partners)
+                rows = _score_one(sigs, score, a, partners, min_sim)
                 conn.executemany(INSERT_PAIR_SQL, rows)
                 since_commit += len(rows)
                 if since_commit >= 10 * _INSERT_CHUNK:
@@ -855,7 +889,7 @@ def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
                 bar.add(1 if cap else n - 1 - i)
     finally:
         bar.finish()
-    _set_meta(conn, "pairs", fn_name, None, cap or None)
+    _set_meta(conn, "pairs", fn_name, None, cap or None, min_sim or None)
     conn.commit()
     if parallel:
         conn.execute("PRAGMA journal_mode=DELETE")
@@ -896,6 +930,16 @@ def build_groups(conn: sqlite3.Connection, threshold: float,
         raise LookupError(
             f"stored pairs were built with --fn {pmeta['fn']}; "
             f"rerun --pairs --fn {fn_arg} to switch functions")
+    # Pairs below a storage floor were computed but never kept, so a
+    # threshold under the floor cannot be answered from this table --
+    # refuse rather than silently group from incomplete data. Databases
+    # written before the column exist have no floor (full nonzero set).
+    floor = pmeta["min_sim"] if "min_sim" in pmeta.keys() else None
+    if floor is not None and threshold < floor:
+        raise LookupError(
+            f"stored pairs were built with --min-sim {floor:g}; pairs "
+            f"below it were not kept -- rerun --pairs with --min-sim "
+            f"{threshold:g} or lower to group at this threshold")
 
     pairs = conn.execute(
         """
@@ -1131,6 +1175,11 @@ def main(argv: list[str] | None = None) -> int:
                              "all-pairs; 0 forces exhaustive. Default: "
                              "exhaustive up to ~10k dirs, then candidates "
                              f"with N={DEFAULT_MAX_DF}")
+    parser.add_argument("--min-sim", type=float, metavar="X", default=0.0,
+                        help="--pairs: keep only pairs scoring at least X "
+                             "(0.0-1.0); a later --threshold below X is "
+                             "refused. Default 0.0: keep every nonzero "
+                             "pair")
     parser.add_argument("--ls", metavar="DIR",
                         help="list the files in DIR (absolute or "
                              "mount-relative) using the directory index")
@@ -1154,6 +1203,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--jobs must be at least 1")
     if args.max_df is not None and args.max_df < 0:
         parser.error("--max-df must be 0 (exhaustive) or a positive cap")
+    if not 0.0 <= args.min_sim <= 1.0:
+        parser.error("--min-sim must be between 0.0 and 1.0")
     if args.dups and args.top is not None:
         parser.error("--dups and --top are mutually exclusive")
     if args.top is not None and args.top < 1:
@@ -1171,7 +1222,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.pairs:
                 build_pairs(conn, args.database, args.fn or DEFAULT_FN,
                             jobs=args.jobs, progress=args.progress,
-                            max_df=args.max_df)
+                            max_df=args.max_df, min_sim=args.min_sim)
             if args.threshold is not None \
                     and not grouping_current(conn, args.threshold, args.fn):
                 build_groups(conn, args.threshold, args.fn)
