@@ -16,7 +16,8 @@ Usage (pipeline order):
                                               #   store the pairs
     grouper.py --database DB --index [--progress]          # stage 1 alone
     grouper.py --database DB --pairs [--fn N] [--jobs N] [--progress]
-                                     [--max-df N] [--min-sim X]  # stage 2 alone
+                                     [--max-df N] [--min-sim X] [--name]
+                                                  # stage 2 alone
     grouper.py --database DB --threshold 0.7  # stage 3: build + persist groups
                                               #   (skipped if the stored grouping
                                               #   is already current), then
@@ -24,11 +25,15 @@ Usage (pipeline order):
     grouper.py --database DB                  # THE report: show stored grouping
 
     grouper.py --database DB --ls DIR             # inspect one directory
-    grouper.py --database DB --compare A B [--fn N]  # similarity of two dirs
+    grouper.py --database DB --compare A B [--fn N] [--name]
+                                                  # similarity of two dirs
     grouper.py --database DB --dups [--min N]     # duplicate *files* report
     grouper.py --database DB --top [N]            # the N (default 1) most
                                                   #   frequent checksums,
                                                   #   excluding empty files
+    grouper.py --database DB --clean-db           # drop every grouper-owned
+                                                  #   derived table and VACUUM,
+                                                  #   returning the space
 
 Stages may be combined in one invocation (--prep --threshold 0.7). --index and
 --pairs are silent on success; --threshold ends with the stored-grouping
@@ -42,10 +47,15 @@ Data model (grouper-owned derived tables inside the sumtag database):
         contents are one keyed lookup. Comparisons are direct-children only,
         deliberately -- a directory's own file listing is its signature.
     dir_pairs -- similarity for every pair of directories (dir_a < dir_b),
-        computed by one named comparison function. ALL nonzero pairs are
-        stored, not just those above any threshold: the N^2 comparison is the
-        expensive part, so the threshold stays a cheap, exploratory knob --
-        regrouping at a different threshold recomputes nothing.
+        computed by one named comparison function, plus the pair's matched
+        file count (the equal-similarity tie-break, added 2026-07-16: two
+        identical 10,000-file archives and two identical 3-file folders
+        both score 1.0, and the bigger overlap should seed its group
+        first). ALL nonzero pairs are stored, not just those above any
+        threshold: the N^2 comparison is the expensive part, so the
+        threshold stays a cheap, exploratory knob -- regrouping at a
+        different threshold recomputes nothing. A cumulative-byte-size
+        boost is planned as a later companion to the file-count one.
     groups / group_dirs -- the persisted grouping. group_dirs.dir_id is the
         PRIMARY KEY, so "a directory belongs to at most one group" (the
         partition rule) is enforced by the schema, not by code discipline.
@@ -55,7 +65,7 @@ Data model (grouper-owned derived tables inside the sumtag database):
 
 Grouping algorithm (settled by discussion, 2026-07-02/03):
 
-    walk dir_pairs in (similarity DESC, dir_a, dir_b) order:
+    walk dir_pairs in (similarity DESC, matched DESC, dir_a, dir_b) order:
         stop at the first pair below the threshold   # the "interestingness"
                                                      # shortcut -- lossless,
                                                      # nothing below it could
@@ -69,7 +79,12 @@ Grouping algorithm (settled by discussion, 2026-07-02/03):
     makes the partition structurally unbreakable. "Similar to a group" means
     similar to any one member (single-linkage; may be refined later). No group
     can ever have a single member. Deterministic for a given database: the
-    walk order is total, so identical inputs give identical groups.
+    walk order is total, so identical inputs give identical groups. Within
+    equal similarity the pair with more matched files ranks first (the
+    file-count tie-break), so the group ids -- creation order = best-first
+    discovery -- put big overlaps ahead of trivial ones in the report. A
+    grouping run against a pair table from before the matched column is
+    refused with a rerun hint, the same idiom as the --min-sim floor.
 
 Comparison functions:
 
@@ -133,6 +148,19 @@ Storage floor (--min-sim):
     the registry; revisit per-function if scoring cost ever matters again
     post-nomination.
 
+Name gate (--name):
+
+    Two directories whose basenames differ score 0.0, unconditionally --
+    only same-named directories can pair, and therefore group. The typical
+    prey is versioned copies of one tree (proj/, backup/proj/, old/proj/),
+    where the directory's own name survives a copy even as contents drift;
+    the gate also slashes what --pairs stores. Applies to --pairs and
+    --compare alike, and is recorded in grouper_meta alongside
+    max_df/min_sim. It is a filter BEFORE scoring -- nominated candidates
+    are name-checked first, so every kept score is exact and the nomination
+    invariant is untouched. The mount point itself (rel_path '') has
+    basename '' and only ever matches another mount root.
+
 Progress (--progress):
 
     A live bar (stderr) on the build stages, following sumtag's
@@ -146,6 +174,20 @@ Progress (--progress):
     files for --index, N*(N-1)/2 comparisons for exhaustive --pairs; under
     candidate nomination the pair count isn't knowable up front, so the bar
     counts directories completed out of N instead.
+
+Cleaning up (--clean-db):
+
+    Every table grouper creates is derived -- rebuildable from the sumtag
+    tables with one --prep -- so none is needed forever, and dir_pairs in
+    particular can dwarf the files table it was derived from. --clean-db
+    drops all six grouper-owned tables (dirs, dir_files, dir_pairs, groups,
+    group_dirs, grouper_meta) and VACUUMs, which is what actually returns
+    the space to the filesystem (SQLite keeps freed pages otherwise).
+    All-or-nothing on purpose: the artifacts are interdependent (the group
+    report joins dirs and reads dir_pairs), so a partial clean would leave
+    a grouping that can't be reported. Sumtag's own tables (files,
+    mountpoints, prescan_summary) are never touched. Standalone: combining
+    it with any other action is an error.
 
 Caveats: derived tables go stale when sumtag rescans (rerun the pipeline);
 dir_files references files.rowid, which VACUUM can renumber -- both fine for
@@ -199,36 +241,41 @@ def _now_iso() -> str:
 
 def _set_meta(conn: sqlite3.Connection, artifact: str, fn: str,
               threshold: float | None, max_df: int | None = None,
-              min_sim: float | None = None) -> None:
+              min_sim: float | None = None,
+              name_match: bool = False) -> None:
     """Record provenance for a built artifact ('pairs' or 'groups').
 
     max_df is the candidate-nomination cap the pair table was built with
     (NULL = exhaustive all-pairs); min_sim is its storage floor (NULL = all
-    nonzero pairs kept). Older databases predate these columns, so they are
-    added in place when missing.
+    nonzero pairs kept); name_match records the --name gate (NULL = off).
+    Older databases predate these columns, so they are added in place when
+    missing.
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS grouper_meta (
-          artifact  TEXT PRIMARY KEY,
-          fn        TEXT NOT NULL,
-          threshold REAL,              -- NULL for the pair table
-          built_at  TEXT NOT NULL,
-          max_df    INTEGER,           -- nomination cap; NULL = exhaustive
-          min_sim   REAL               -- storage floor; NULL = keep nonzero
+          artifact   TEXT PRIMARY KEY,
+          fn         TEXT NOT NULL,
+          threshold  REAL,             -- NULL for the pair table
+          built_at   TEXT NOT NULL,
+          max_df     INTEGER,          -- nomination cap; NULL = exhaustive
+          min_sim    REAL,             -- storage floor; NULL = keep nonzero
+          name_match INTEGER           -- --name gate; NULL = off
         )""")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(grouper_meta)")}
-    for col, typ in (("max_df", "INTEGER"), ("min_sim", "REAL")):
+    for col, typ in (("max_df", "INTEGER"), ("min_sim", "REAL"),
+                     ("name_match", "INTEGER")):
         if col not in cols:
             conn.execute(f"ALTER TABLE grouper_meta ADD COLUMN {col} {typ}")
     conn.execute("""
         INSERT INTO grouper_meta(artifact, fn, threshold, built_at,
-                                 max_df, min_sim)
-        VALUES (?, ?, ?, ?, ?, ?)
+                                 max_df, min_sim, name_match)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(artifact) DO UPDATE SET
             fn=excluded.fn, threshold=excluded.threshold,
             built_at=excluded.built_at, max_df=excluded.max_df,
-            min_sim=excluded.min_sim
-        """, (artifact, fn, threshold, _now_iso(), max_df, min_sim))
+            min_sim=excluded.min_sim, name_match=excluded.name_match
+        """, (artifact, fn, threshold, _now_iso(), max_df, min_sim,
+              1 if name_match else None))
 
 
 def _get_meta(conn: sqlite3.Connection, artifact: str):
@@ -461,9 +508,14 @@ def ls(conn: sqlite3.Connection, path: str) -> int:
 # 0.0 = nothing in common, 1.0 = identical. Each is a (signature, score)
 # pair: signature(files) distills one directory's file-list into the value
 # the scorer consumes, built once per directory; score(sig_a, sig_b) does the
-# pairwise math, called N^2/2 times by --pairs. Each function may weigh
-# whatever it likes, but must be consistent for the same directories in the
-# same database -- both halves are pure, so determinism comes free.
+# pairwise math, called N^2/2 times by --pairs, and returns a
+# (similarity, matched) tuple -- matched is the number of files in common
+# under the function's own notion of matching (shared basenames for
+# name-score, the multiset intersection for the Jaccard functions), stored
+# per pair as the grouping walk's equal-similarity tie-break. Each function
+# may weigh whatever it likes, but must be consistent for the same
+# directories in the same database -- both halves are pure, so determinism
+# comes free.
 # Signatures must be plain picklable values (dicts/Counters of str tuples,
 # never sqlite3.Row), since --jobs ships them to worker processes.
 # Registered by name in COMPARISONS; swapped with --fn.
@@ -496,8 +548,10 @@ def sig_name_digest(files) -> Counter:
                    for r in files)
 
 
-def _multiset_jaccard(a: Counter, b: Counter) -> float:
+def _multiset_jaccard(a: Counter, b: Counter) -> tuple[float, int]:
     """Jaccard similarity on multisets: |A & B| / |A | B|, empty-vs-empty = 1.0.
+    Returns (similarity, matched): the intersection size doubles as the
+    matched-file count (the scorer contract's second element).
 
     Multisets rather than sets so repetition counts: a directory holding two
     copies of the same content is not identical to one holding a single copy.
@@ -505,10 +559,10 @@ def _multiset_jaccard(a: Counter, b: Counter) -> float:
     never in its signature.
     """
     if not a and not b:
-        return 1.0  # two empty directories have identical (empty) contents
+        return 1.0, 0  # two empty directories have identical (empty) contents
     inter = sum((a & b).values())
     union = sum((a | b).values())
-    return inter / union
+    return inter / union, inter
 
 
 # --- Name-anchored scoring ---------------------------------------------------
@@ -562,8 +616,10 @@ def sig_names(files) -> dict:
 
 
 def make_name_score(max_fn):
-    """Build a name-anchored scorer (over sig_names) around one max-score fn."""
-    def score(a: dict, b: dict) -> float:
+    """Build a name-anchored scorer (over sig_names) around one max-score fn.
+    Returns (similarity, matched); matched here is the shared-basename count
+    -- this function's own notion of a file in common."""
+    def score(a: dict, b: dict) -> tuple[float, int]:
         matched = a.keys() & b.keys()
         points = len(matched)          # 1 point per shared basename
         for name in matched:
@@ -574,8 +630,8 @@ def make_name_score(max_fn):
                 points += 2
         denom = max_fn(len(a), len(b), len(matched))
         if denom == 0:
-            return 1.0  # two empty directories have identical (empty) contents
-        return points / denom
+            return 1.0, 0  # two empty dirs have identical (empty) contents
+        return points / denom, len(matched)
     return score
 
 
@@ -592,18 +648,23 @@ COMPARISONS = {
 
 
 def compare(conn: sqlite3.Connection, path_a: str, path_b: str,
-            fn_name: str) -> int:
+            fn_name: str, name_match: bool = False) -> int:
     """CLI wrapper: resolve two directory paths, score them, print similarity."""
     make_sig, score = COMPARISONS[fn_name]
     sides = []
+    names = []
     for path in (path_a, path_b):
         d = resolve_dir(conn, path)
         if d is None:
             print(f"grouper: directory not in index: {path} (run --index?)",
                   file=sys.stderr)
             return 1
+        names.append(os.path.basename(d["rel_path"]))
         sides.append(make_sig(_dir_files(conn, d["id"])))
-    print(f"{score(sides[0], sides[1]):.4f}")
+    if name_match and names[0] != names[1]:
+        print("0.0000")                # the --name gate; contents never scored
+        return 0
+    print(f"{score(sides[0], sides[1])[0]:.4f}")
     return 0
 
 
@@ -616,16 +677,20 @@ CREATE TABLE dir_pairs (
   dir_a      INTEGER NOT NULL REFERENCES dirs(id),   -- dir_a < dir_b: each
   dir_b      INTEGER NOT NULL REFERENCES dirs(id),   -- unordered pair once
   similarity REAL NOT NULL,
+  matched    INTEGER NOT NULL,  -- files in common: the equal-similarity
+                                -- tie-break (more matched files ranks first)
   PRIMARY KEY (dir_a, dir_b)
 );
 
 -- Exactly the grouping walk's order, so the walk is one index scan.
-CREATE INDEX idx_dir_pairs_walk ON dir_pairs(similarity DESC, dir_a, dir_b);
+CREATE INDEX idx_dir_pairs_walk
+    ON dir_pairs(similarity DESC, matched DESC, dir_a, dir_b);
 """
 
 
 INSERT_PAIR_SQL = \
-    "INSERT INTO dir_pairs(dir_a, dir_b, similarity) VALUES (?, ?, ?)"
+    "INSERT INTO dir_pairs(dir_a, dir_b, similarity, matched) " \
+    "VALUES (?, ?, ?, ?)"
 
 _INSERT_CHUNK = 100_000     # rows per executemany between progress ticks
 
@@ -686,6 +751,7 @@ _IDS: list | None = None
 _SCORE = None
 _INDEX: dict | None = None      # nomination index; None = exhaustive mode
 _FLOOR = 0.0                    # --min-sim storage floor; 0.0 = keep nonzero
+_NAMES: dict | None = None      # dir_id -> basename; None = no --name gate
 
 
 def _load_signatures(conn: sqlite3.Connection, fn_name: str,
@@ -721,13 +787,21 @@ def _load_signatures(conn: sqlite3.Connection, fn_name: str,
     return sigs
 
 
+def _load_names(conn: sqlite3.Connection) -> dict[int, str]:
+    """dir_id -> basename, for the --name gate. The mount point itself
+    (rel_path '') has basename '' and only ever matches another mount root."""
+    return {r["id"]: os.path.basename(r["rel_path"])
+            for r in conn.execute("SELECT id, rel_path FROM dirs")}
+
+
 def _pairs_init(db_path: str, fn_name: str, max_df: int,
-                min_sim: float) -> None:
+                min_sim: float, name_match: bool) -> None:
     """max_df of 0 means exhaustive mode (no nomination index)."""
-    global _SIGS, _IDS, _SCORE, _INDEX, _FLOOR
+    global _SIGS, _IDS, _SCORE, _INDEX, _FLOOR, _NAMES
     conn = connect(db_path)                # read-only; closed after the load
     try:
         _SIGS = _load_signatures(conn, fn_name)
+        _NAMES = _load_names(conn) if name_match else None
     finally:
         conn.close()
     _IDS = sorted(_SIGS)
@@ -737,15 +811,20 @@ def _pairs_init(db_path: str, fn_name: str, max_df: int,
 
 
 def _score_one(sigs: dict, score, a: int, partners,
-               floor: float = 0.0) -> list:
+               floor: float = 0.0, names: dict | None = None) -> list:
     """Pairs of dir a against the given later dirs scoring >= the floor
-    (and above zero -- the default floor of 0.0 keeps all nonzero)."""
+    (and above zero -- the default floor of 0.0 keeps all nonzero).
+    With names, the --name gate: a partner named differently scores 0 by
+    definition and is never handed to the scorer."""
     sig_a = sigs[a]
+    name_a = names[a] if names is not None else None
     out = []
     for b in partners:
-        s = score(sig_a, sigs[b])
+        if names is not None and names[b] != name_a:
+            continue
+        s, m = score(sig_a, sigs[b])
         if s > 0.0 and s >= floor:
-            out.append((a, b, s))
+            out.append((a, b, s, m))
     return out
 
 
@@ -755,13 +834,14 @@ def _score_stripe(outer: range) -> list:
         a = _IDS[i]
         partners = _IDS[i + 1:] if _INDEX is None \
             else _candidate_partners(_INDEX, _SIGS[a], a)
-        out.extend(_score_one(_SIGS, _SCORE, a, partners, _FLOOR))
+        out.extend(_score_one(_SIGS, _SCORE, a, partners, _FLOOR, _NAMES))
     return out
 
 
 def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
                 jobs: int = 1, progress: bool = False,
-                max_df: int | None = None, min_sim: float = 0.0) -> None:
+                max_df: int | None = None, min_sim: float = 0.0,
+                name_match: bool = False) -> None:
     """Score directory pairs and store the similarities worth keeping.
 
     Exhaustively (every pair, the N^2/2 loop) on smaller corpora, or via
@@ -775,7 +855,9 @@ def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
     they are the overwhelming majority). min_sim > 0 additionally drops
     pairs scoring below it at storage time (the module docstring's
     "Storage floor" section); build_groups refuses a --threshold below the
-    stored floor.
+    stored floor. name_match applies the --name gate (the docstring's "Name
+    gate" section): differently-named pairs score 0 by definition, so they
+    are filtered out before the scorer ever sees them.
 
     The scoring loop fans out across `jobs` worker processes, each of which
     loads its own signature table from the database (see _pairs_init for why
@@ -846,7 +928,7 @@ def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
             with ProcessPoolExecutor(max_workers=jobs,
                                      initializer=_pairs_init,
                                      initargs=(db_path, fn_name, cap,
-                                               min_sim)) as ex:
+                                               min_sim, name_match)) as ex:
                 futs = {ex.submit(_score_stripe, st):
                         (len(st) if cap else sum(n - 1 - i for i in st))
                         for st in stripes}
@@ -875,12 +957,13 @@ def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
             # phases showing their own bars.
             sigs = _load_signatures(conn, fn_name, progress)
             index = _kept_index(sigs, cap) if cap else None
+            names = _load_names(conn) if name_match else None
             since_commit = 0
             for i in range(n):
                 a = ids[i]
                 partners = ids[i + 1:] if index is None \
                     else _candidate_partners(index, sigs[a], a)
-                rows = _score_one(sigs, score, a, partners, min_sim)
+                rows = _score_one(sigs, score, a, partners, min_sim, names)
                 conn.executemany(INSERT_PAIR_SQL, rows)
                 since_commit += len(rows)
                 if since_commit >= 10 * _INSERT_CHUNK:
@@ -889,7 +972,8 @@ def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
                 bar.add(1 if cap else n - 1 - i)
     finally:
         bar.finish()
-    _set_meta(conn, "pairs", fn_name, None, cap or None, min_sim or None)
+    _set_meta(conn, "pairs", fn_name, None, cap or None, min_sim or None,
+              name_match)
     conn.commit()
     if parallel:
         conn.execute("PRAGMA journal_mode=DELETE")
@@ -940,12 +1024,20 @@ def build_groups(conn: sqlite3.Connection, threshold: float,
             f"stored pairs were built with --min-sim {floor:g}; pairs "
             f"below it were not kept -- rerun --pairs with --min-sim "
             f"{threshold:g} or lower to group at this threshold")
+    # A pair table from before the matched column can't drive the
+    # file-count tie-break; refuse with the rerun hint, same idiom as the
+    # floor check above -- never silently group with a different order.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(dir_pairs)")}
+    if "matched" not in cols:
+        raise LookupError(
+            "stored pairs predate the matched-file tie-break; "
+            "rerun --pairs to rebuild them")
 
     pairs = conn.execute(
         """
         SELECT dir_a, dir_b FROM dir_pairs
          WHERE similarity >= ?
-      ORDER BY similarity DESC, dir_a, dir_b
+      ORDER BY similarity DESC, matched DESC, dir_a, dir_b
         """, (threshold,)).fetchall()
 
     conn.executescript(GROUPS_SQL)
@@ -1040,6 +1132,34 @@ def report_groups(conn: sqlite3.Connection) -> int:
         for path in members:
             print(f"    {path}")
     print(f"\n{len(by_gid)} group(s), {len(rows)} directorie(s)")
+    return 0
+
+
+# --- Cleanup (--clean-db) ------------------------------------------------------
+
+# Children before the tables they reference, purely for tidiness (SQLite
+# doesn't enforce the FKs by default). Everything here is derived --
+# rebuildable with one --prep -- and nothing here belongs to sumtag.
+GROUPER_TABLES = ("dir_files", "dirs", "dir_pairs",
+                  "group_dirs", "groups", "grouper_meta")
+
+
+def clean_db(conn: sqlite3.Connection, db_path: str) -> int:
+    """Drop every grouper-owned derived table and VACUUM (see the module
+    docstring's "Cleaning up" section). Reports what was dropped and how
+    far the database file shrank."""
+    dropped = [t for t in GROUPER_TABLES if _table_exists(conn, t)]
+    if not dropped:
+        print("grouper: no grouper tables present; nothing to clean")
+        return 0
+    before = os.path.getsize(db_path)
+    for t in dropped:
+        conn.execute(f"DROP TABLE {t}")
+    conn.commit()
+    conn.execute("VACUUM")
+    after = os.path.getsize(db_path)
+    print(f"dropped:   {', '.join(dropped)}")
+    print(f"reclaimed: {before:,} -> {after:,} bytes")
     return 0
 
 
@@ -1180,6 +1300,10 @@ def main(argv: list[str] | None = None) -> int:
                              "(0.0-1.0); a later --threshold below X is "
                              "refused. Default 0.0: keep every nonzero "
                              "pair")
+    parser.add_argument("--name", action="store_true",
+                        help="--pairs/--compare: two directories whose "
+                             "basenames differ score 0 -- only same-named "
+                             "directories can pair (and therefore group)")
     parser.add_argument("--ls", metavar="DIR",
                         help="list the files in DIR (absolute or "
                              "mount-relative) using the directory index")
@@ -1195,6 +1319,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min", type=int, default=2, metavar="N",
                         help="--dups/--top: only groups of at least N files "
                              "(default: 2)")
+    parser.add_argument("--clean-db", dest="clean_db", action="store_true",
+                        help="drop every grouper-owned derived table (dirs, "
+                             "dir_files, dir_pairs, groups, group_dirs, "
+                             "grouper_meta) and VACUUM, returning their "
+                             "space; sumtag's tables are never touched. "
+                             "Cannot be combined with any other action")
     args = parser.parse_args(argv)
 
     if args.threshold is not None and not 0.0 <= args.threshold <= 1.0:
@@ -1209,9 +1339,21 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--dups and --top are mutually exclusive")
     if args.top is not None and args.top < 1:
         parser.error("--top must be at least 1")
+    if args.clean_db and (args.prep or args.index or args.pairs
+                          or args.threshold is not None or args.ls is not None
+                          or args.compare is not None or args.dups
+                          or args.top is not None):
+        parser.error("--clean-db cannot be combined with any other action")
 
     if args.prep:
         args.index = args.pairs = True
+
+    if args.clean_db:
+        conn = connect(args.database, writable=True)
+        try:
+            return clean_db(conn, args.database)
+        finally:
+            conn.close()
 
     building = args.index or args.pairs or args.threshold is not None
     conn = connect(args.database, writable=building)
@@ -1222,7 +1364,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.pairs:
                 build_pairs(conn, args.database, args.fn or DEFAULT_FN,
                             jobs=args.jobs, progress=args.progress,
-                            max_df=args.max_df, min_sim=args.min_sim)
+                            max_df=args.max_df, min_sim=args.min_sim,
+                            name_match=args.name)
             if args.threshold is not None \
                     and not grouping_current(conn, args.threshold, args.fn):
                 build_groups(conn, args.threshold, args.fn)
@@ -1234,7 +1377,7 @@ def main(argv: list[str] | None = None) -> int:
             return ls(conn, args.ls)
         if args.compare is not None:
             return compare(conn, args.compare[0], args.compare[1],
-                           args.fn or DEFAULT_FN)
+                           args.fn or DEFAULT_FN, name_match=args.name)
         if args.dups:
             report_dups(conn, args.min)
             return 0

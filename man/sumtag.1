@@ -21,7 +21,7 @@ integrity check offered by
 .PP
 An explicit action option is required: every run must name what it does with
 one of
-.BR \-\-sum ", " \-\-verify ", " \-\-remove ", " \-\-import ", or " \-\-locate .
+.BR \-\-sum ", " \-\-verify ", " \-\-remove ", " \-\-import ", " \-\-locate ", or " \-\-prune\-dirs .
 A bare
 .B sumtag
 .I DIRECTORY
@@ -48,6 +48,12 @@ and subdirectories are then recursed into in the same order, so the
 processing order can be followed against an
 .BR ls (1)
 listing. This holds in every mode.
+.PP
+Symbolic links are not content: a symlink encountered during traversal is
+never followed, hashed, stamped, verified, or removed, in any mode. A
+.I DIRECTORY
+named on the command line may itself be a symbolic link, which is honoured;
+nothing found beneath it is followed.
 .SH RE-HASHING
 A file is hashed, or re-hashed, when any of the following hold:
 .IP \(bu 3
@@ -145,7 +151,7 @@ supported. Database paths are stored relative to the file's mount point so
 they survive remounting at a different location.
 .B \-\-database
 takes no action by itself; it requires at least one of
-.BR \-\-sum ", " \-\-import ", or " \-\-locate
+.BR \-\-sum ", " \-\-import ", " \-\-locate ", or " \-\-prune\-dirs
 to say what to do with it.
 .TP
 .B \-\-sum
@@ -273,6 +279,45 @@ files are hashed. Requires
 cannot be combined with
 .BR \-\-prescan " or " \-\-remove .
 .TP
+.B \-\-prune\-dirs
+Reconcile the database with a changed filesystem: collect every directory the
+database knows under the given roots (the distinct parent directories of its
+file rows), check each one with a single
+.BR stat (2),
+and delete the rows of directories that no longer exist. A deleted directory
+takes exactly its resident file rows with it; nothing is deleted recursively,
+because a vanished subdirectory is discovered by its own check \(em every
+known directory is in the list. The filesystem is never modified. Each
+.I DIRECTORY
+named on the command line must exist \(em a missing root is an error (exit
+status 2) before the database is even opened, so an unmounted drive can never
+read as a mass deletion \(em and only rows recorded under the root's current
+mount point are candidates. The
+.I DIRECTORY
+argument is therefore not what is scanned (the walk is over the database);
+it is the operation's safety scope. Naming a root that exists is the
+evidence that the filesystem its rows describe is actually mounted and
+live, and it confines the reconciliation to that subtree \(em so a database
+that mirrors several drives can be pruned one drive at a time while the
+others sit unplugged. The database itself must already exist; it is
+never created by this option. A directory deleted from the filesystem but
+moved elsewhere is pruned at its old location like any other deletion; files
+deleted from a directory that still exists are not noticed. Combined with
+.BR \-\-dry\-run ,
+previews what would be pruned without deleting anything. With
+.BR \-\-progress ,
+a live
+.IR nnn / mmm
+counter reports directories checked against the total known at the start.
+Requires
+.BR \-\-database .
+Cannot be combined with
+.BR \-\-sum ", " \-\-import ", " \-\-locate ", " \-\-verify ", " \-\-remove ", " \-\-force ", " \-\-prescan ", " \-\-db\-prescan ", " \-\-exclude ", or " \-\-no\-ignore
+(the last two govern filesystem traversal, and this option walks the
+database, not the filesystem). See
+.B EXIT STATUS
+below.
+.TP
 .B \-\-no\-ignore
 Disregard all
 .B @sumtag\-ignore
@@ -325,9 +370,14 @@ the number of files the mode processed and their cumulative size (headlined
 .BR hashed ,
 .BR "would hash" ,
 .BR imported ,
-.BR verified ", or"
-.B removed
-to match the mode), any nonzero
+.BR verified ", "
+.BR removed ", or"
+.B pruned
+to match the mode;
+.B pruned
+counts directories and file rows, followed by a
+.B checked
+line with the total directories examined), any nonzero
 .BR skipped ,
 .BR errors ,
 .BR CORRUPT ,
@@ -346,7 +396,7 @@ had already completed. The process then exits
 (128 + SIGINT, the shell convention).
 .SH EXIT STATUS
 Without
-.BR \-\-verify ,
+.BR \-\-verify " or " \-\-prune\-dirs ,
 sumtag exits
 .B 0
 on success and non-zero if an error prevented completion.
@@ -362,6 +412,19 @@ one or more checksum mismatches (corruption) were found.
 .TP
 .B 2
 unreadable files or other errors prevented a complete check.
+.PP
+With
+.BR \-\-prune\-dirs ,
+the same scheme, applied to staleness:
+.B 0
+means nothing was stale (the database already matches the filesystem),
+.B 1
+means stale directories were found and pruned (or would be pruned, under
+.BR \-\-dry\-run ),
+and
+.B 2
+means errors prevented a complete check (including a missing scan root or
+database).
 .PP
 In any mode, a run interrupted by Ctrl-C exits
 .B 130
@@ -428,6 +491,14 @@ Stamp an archive, skipping DVD rip payloads:
 .PP
 .EX
 sumtag \-\-sum \-\-exclude '*.vob' \-\-exclude VIDEO_TS /data
+.EE
+.PP
+After deleting directories from an archive, drop their stale database rows
+(previewing first):
+.PP
+.EX
+sumtag \-\-prune\-dirs \-n \-\-database /var/lib/sumtag.sqlite /data
+sumtag \-\-prune\-dirs \-\-database /var/lib/sumtag.sqlite /data
 .EE
 .SH NOTES
 Timestamps are recorded in UTC with microsecond precision. Mtime comparisons

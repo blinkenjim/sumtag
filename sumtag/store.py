@@ -219,11 +219,25 @@ class PrescanSummary:
 
 
 class SQLiteStore:
-    """The SQLite backend. Creates its schema on open; idempotent UPSERT by location."""
+    """The SQLite backend. Creates its schema on open; idempotent UPSERT by location.
 
-    def __init__(self, path: str) -> None:
-        self._conn = sqlite3.connect(path)
-        self._conn.executescript(_SCHEMA_SQL)
+    ``mode`` is the SQLite URI open mode: the default ``rwc`` creates a
+    missing database file (the mirror-sink case); ``rw`` and ``ro`` require
+    it to already exist (--prune-dirs, which reconciles an existing mirror
+    and must never conjure an empty one), with ``ro`` additionally skipping
+    schema creation for a strictly read-only open (its -n preview). A
+    missing file under rw/ro raises FileNotFoundError.
+    """
+
+    def __init__(self, path: str, mode: str = "rwc") -> None:
+        try:
+            self._conn = sqlite3.connect(f"file:{path}?mode={mode}", uri=True)
+            if mode != "ro":
+                self._conn.executescript(_SCHEMA_SQL)
+        except sqlite3.OperationalError as e:
+            if mode != "rwc" and not os.path.exists(path):
+                raise FileNotFoundError(f"no such database: {path}") from e
+            raise
         self._mp_cache: dict[str, int] = {}
 
     def ensure_mountpoint(self, path: str) -> int:
@@ -297,6 +311,63 @@ class SQLiteStore:
              mountpoint_id, rel_path),
         )
 
+    def iter_file_dirs(self, mount_path: str, rel_prefix: str):
+        """Every distinct directory that directly contains a files row under
+        the given mountpoint and rel prefix, as sorted (dir_rel, file_count)
+        pairs. ``rel_prefix`` of '' means the whole mountpoint.
+
+        Directories are derived from the file rows themselves (the schema
+        stores no directory table), which is what makes --prune-dirs need no
+        recursion: a vanished parent implies vanished children, and every
+        child that held files is independently in this list.
+        """
+        row = self._conn.execute(
+            "SELECT id FROM mountpoints WHERE path = ?",
+            (mount_path,)).fetchone()
+        if row is None:
+            return []
+        if rel_prefix:
+            prefix = rel_prefix.rstrip("/") + "/"
+            cur = self._conn.execute(
+                "SELECT rel_path FROM files WHERE mountpoint_id = ? "
+                "AND substr(rel_path, 1, ?) = ?",
+                (row[0], len(prefix), prefix))
+        else:
+            cur = self._conn.execute(
+                "SELECT rel_path FROM files WHERE mountpoint_id = ?",
+                (row[0],))
+        counts: dict[str, int] = {}
+        for (rel_path,) in cur:
+            d = os.path.dirname(rel_path)
+            counts[d] = counts.get(d, 0) + 1
+        return sorted(counts.items())
+
+    def delete_dir_files(self, mount_path: str, dir_rel: str) -> int:
+        """Delete every files row *directly* inside dir_rel (dirname equality,
+        never recursive -- see iter_file_dirs); returns the rows deleted.
+        Committed immediately, so an interrupted --prune-dirs keeps the
+        prunes it completed.
+        """
+        row = self._conn.execute(
+            "SELECT id FROM mountpoints WHERE path = ?",
+            (mount_path,)).fetchone()
+        if row is None:
+            return 0
+        if dir_rel:
+            prefix = dir_rel + "/"
+            cur = self._conn.execute(
+                "DELETE FROM files WHERE mountpoint_id = ? "
+                "AND substr(rel_path, 1, ?) = ? "
+                "AND instr(substr(rel_path, ?), '/') = 0",
+                (row[0], len(prefix), prefix, len(prefix) + 1))
+        else:
+            cur = self._conn.execute(
+                "DELETE FROM files WHERE mountpoint_id = ? "
+                "AND instr(rel_path, '/') = 0",
+                (row[0],))
+        self._conn.commit()
+        return cur.rowcount
+
     def save_prescan_summary(self, s: PrescanSummary) -> None:
         """Store the prescan totals, replacing any previous summary (one per db)."""
         self._conn.execute(
@@ -316,19 +387,21 @@ class SQLiteStore:
         self._conn.close()
 
 
-def open_store(value: str):
+def open_store(value: str, mode: str = "rwc"):
     """Resolve a ``--database`` value to a Store. Only SQLite is implemented today.
 
     No scheme  -> SQLite file path. ``scheme://…`` -> a DSN dispatched by scheme;
     ``sqlite://`` is accepted, other schemes are recognized but rejected.
+    ``mode`` is passed through to the backend (see SQLiteStore): ``rwc``
+    creates a missing database, ``rw``/``ro`` require an existing one.
     """
     if _SCHEME_RE.match(value):
         scheme, _, rest = value.partition("://")
         if scheme == "sqlite":
-            return SQLiteStore(rest)
+            return SQLiteStore(rest, mode)
         raise NotImplementedError(
             f"database backend '{scheme}://' is not yet supported")
-    return SQLiteStore(value)
+    return SQLiteStore(value, mode)
 
 
 def read_prescan_summary(value: str) -> PrescanSummary | None:

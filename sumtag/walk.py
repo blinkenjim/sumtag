@@ -95,4 +95,13 @@ def iter_files(
                     continue   # the marker is never hashed or stamped
                 if patterns and _excluded_by(name, patterns) is not None:
                     continue
-                yield os.path.join(dirpath, name)
+                path = os.path.join(dirpath, name)
+                # Symlinks are not content (CLAUDE.md "Symbolic links",
+                # fixed 2026-07-16): os.walk lists them under files --
+                # broken ones used to surface as per-file errors, and live
+                # ones were stamped THROUGH the link, planting the xattr on
+                # the target (possibly outside the tree). Skipped in every
+                # mode, silently, like every traversal-level exclusion.
+                if os.path.islink(path):
+                    continue
+                yield path
