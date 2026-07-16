@@ -84,9 +84,15 @@ Comparison functions:
     pairwise math. Both are pure functions, so determinism comes free.
 
     --pairs distributes the scoring across --jobs worker processes (default:
-    all CPUs). Signatures are plain picklable values shipped once per worker;
-    all database writes stay in the parent (SQLite has one writer). The pair
-    set produced is identical at any --jobs value.
+    all CPUs). Each worker loads its own signature table straight from the
+    database over a read-only connection -- nothing large is ever pickled
+    across the spawn pipe -- so every worker holds a full copy in RAM:
+    --jobs is a memory knob as much as a speed knob on a big corpus. All
+    database writes stay in the parent (SQLite has one writer), committed
+    incrementally; an interrupted --pairs keeps its completed inserts but
+    deletes the pairs provenance first, so --threshold refuses a partial
+    table ("no stored pairs") until a --pairs run completes. The pair set
+    produced is identical at any --jobs value.
 
     --progress adds a live bar (stderr) to the build stages, following
     sumtag's conventions: opt-in, appears once a stage has run 2 seconds,
@@ -121,11 +127,19 @@ DEFAULT_FN = "name-score"
 # --- Plumbing ----------------------------------------------------------------
 
 def connect(path: str, writable: bool = False) -> sqlite3.Connection:
-    """Open the sumtag SQLite database, read-only unless a build stage runs."""
+    """Open the sumtag SQLite database, read-only unless a build stage runs.
+
+    A writable connection gets a generous busy timeout: during --pairs the
+    parent commits while late-starting workers may still hold read locks for
+    their signature load, and the default 5s would surface as spurious
+    "database is locked" errors instead of a short wait.
+    """
     if not os.path.exists(path):
         sys.exit(f"grouper: no such database: {path}")
     mode = "rw" if writable else "ro"
-    conn = sqlite3.connect(f"file:{path}?mode={mode}", uri=True)
+    timeout = 600.0 if writable else 5.0
+    conn = sqlite3.connect(f"file:{path}?mode={mode}", uri=True,
+                           timeout=timeout)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -549,68 +563,33 @@ INSERT_PAIR_SQL = \
 
 _INSERT_CHUNK = 100_000     # rows per executemany between progress ticks
 
-# Worker-process state, installed by _pairs_init. The signature table is
-# shipped (pickled) once per worker via the pool initializer, not once per
-# task -- macOS spawns rather than forks, so per-task shipping would drown
-# the scoring. The scorer is re-resolved from COMPARISONS by name because
-# name-score is a closure, and closures don't pickle.
+# Worker-process state, installed by _pairs_init. Each worker loads the
+# file rows and builds the signature table ITSELF, from its own read-only
+# connection -- nothing large ever crosses the spawn pipe. The first cut
+# shipped the parent's finished signature table via initargs, which pickles
+# it through a pipe once per worker: at real-archive scale (a 24M-file
+# corpus measured ~7-8GB of signatures) that wedged the whole run before
+# the first task was even dispatched. Only the database path and function
+# name are sent now. The cost is each worker redoing the load (concurrent
+# read-only scans, amortized by the OS page cache); the constraint that
+# remains is RAM -- every worker holds a full signature table, so --jobs
+# is a memory knob as much as a speed knob. The scorer is re-resolved from
+# COMPARISONS by name because name-score is a closure, and closures don't
+# pickle.
 _SIGS: dict | None = None
 _IDS: list | None = None
 _SCORE = None
 
 
-def _pairs_init(sigs: dict, ids: list, fn_name: str) -> None:
-    global _SIGS, _IDS, _SCORE
-    _SIGS, _IDS, _SCORE = sigs, ids, COMPARISONS[fn_name][1]
+def _load_signatures(conn: sqlite3.Connection, fn_name: str,
+                     progress: bool = False) -> dict:
+    """Stream every indexed file row and distill per-directory signatures.
 
-
-def _score_one(ids: list, sigs: dict, score, i: int) -> list:
-    """All nonzero pairs of ids[i] against every later dir -- one outer row."""
-    a = ids[i]
-    sig_a = sigs[a]
-    out = []
-    for b in ids[i + 1:]:
-        s = score(sig_a, sigs[b])
-        if s > 0.0:
-            out.append((a, b, s))
-    return out
-
-
-def _score_stripe(outer: range) -> list:
-    out = []
-    for i in outer:
-        out.extend(_score_one(_IDS, _SIGS, _SCORE, i))
-    return out
-
-
-def build_pairs(conn: sqlite3.Connection, fn_name: str, jobs: int = 1,
-                progress: bool = False) -> None:
-    """Compare every directory to every other; store all nonzero pairs.
-
-    The N^2/2 comparisons are the expensive part, so every similarity > 0 is
-    kept regardless of any threshold -- the threshold stays a cheap knob at
-    grouping time. Zero-similarity pairs are omitted: they can never form or
-    join a group, so their rows would buy nothing (and on real corpora they
-    are the overwhelming majority).
-
-    Each directory's signature is built exactly once, then the scoring loop
-    fans out across `jobs` worker processes. Workers only score; every
-    database write happens here in the parent (SQLite has one writer). The
-    outer loop is triangular (row 0 scores N-1 pairs, the last row none), so
-    workers take interleaved stripes of it -- rows k, k+S, k+2S... -- and
-    each gets an even mix of long and short rows. Stripes are inserted as
-    they complete, so insertion order varies run to run, but the pair set is
-    identical, and the grouping walk orders by its own index, so groups are
-    unaffected. Each stripe's comparison count is known up front, which is
-    what drives the `progress` bar's a-priori total of N*(N-1)/2.
+    Used identically by the serial path (in-process, with progress bars)
+    and by each worker's initializer (silently -- stderr belongs to the
+    parent's bar).
     """
-    if not _table_exists(conn, "dirs"):
-        raise LookupError("directory index missing; run --index first")
-    make_sig, score = COMPARISONS[fn_name]
-
-    # The pre-scoring phase -- streaming every file row out of the database
-    # and distilling signatures -- is minutes of dead air on a large corpus,
-    # so it gets its own bar (files loaded, then dirs signed).
+    make_sig = COMPARISONS[fn_name][0]
     n_files = conn.execute("SELECT COUNT(*) FROM dir_files").fetchone()[0]
     contents: dict[int, list[sqlite3.Row]] = {}
     load_bar = Progress(n_files, "files", progress)
@@ -632,14 +611,97 @@ def build_pairs(conn: sqlite3.Connection, fn_name: str, jobs: int = 1,
             sig_bar.add(1)
     finally:
         sig_bar.finish()
-    del contents
-    ids = sorted(sigs)
+    return sigs
+
+
+def _pairs_init(db_path: str, fn_name: str) -> None:
+    global _SIGS, _IDS, _SCORE
+    conn = connect(db_path)                # read-only; closed after the load
+    try:
+        _SIGS = _load_signatures(conn, fn_name)
+    finally:
+        conn.close()
+    _IDS = sorted(_SIGS)
+    _SCORE = COMPARISONS[fn_name][1]
+
+
+def _score_one(ids: list, sigs: dict, score, i: int) -> list:
+    """All nonzero pairs of ids[i] against every later dir -- one outer row."""
+    a = ids[i]
+    sig_a = sigs[a]
+    out = []
+    for b in ids[i + 1:]:
+        s = score(sig_a, sigs[b])
+        if s > 0.0:
+            out.append((a, b, s))
+    return out
+
+
+def _score_stripe(outer: range) -> list:
+    out = []
+    for i in outer:
+        out.extend(_score_one(_IDS, _SIGS, _SCORE, i))
+    return out
+
+
+def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
+                jobs: int = 1, progress: bool = False) -> None:
+    """Compare every directory to every other; store all nonzero pairs.
+
+    The N^2/2 comparisons are the expensive part, so every similarity > 0 is
+    kept regardless of any threshold -- the threshold stays a cheap knob at
+    grouping time. Zero-similarity pairs are omitted: they can never form or
+    join a group, so their rows would buy nothing (and on real corpora they
+    are the overwhelming majority).
+
+    The scoring loop fans out across `jobs` worker processes, each of which
+    loads its own signature table from the database (see _pairs_init for why
+    nothing large is shipped). Workers only score; every database write
+    happens here in the parent (SQLite has one writer). The outer loop is
+    triangular (row 0 scores N-1 pairs, the last row none), so workers take
+    interleaved stripes of it -- rows k, k+S, k+2S... -- and each gets an
+    even mix of long and short rows. Stripes are inserted and committed as
+    they complete, so insertion order varies run to run, but the pair set is
+    identical, and the grouping walk orders by its own index, so groups are
+    unaffected. Each stripe's comparison count is known up front, which is
+    what drives the `progress` bar's a-priori total of N*(N-1)/2.
+
+    Commits are incremental (per completed stripe / every ~1M rows), so the
+    run never owes one giant endgame commit and an interrupted run keeps its
+    completed inserts. The 'pairs' provenance row is deleted before the
+    first insert and rewritten only on success, so a partial table can never
+    masquerade as a finished one: build_groups refuses it with "no stored
+    pairs" until --pairs completes.
+    """
+    if not _table_exists(conn, "dirs"):
+        raise LookupError("directory index missing; run --index first")
+    score = COMPARISONS[fn_name][1]
+    ids = [r[0] for r in conn.execute("SELECT id FROM dirs ORDER BY id")]
     n = len(ids)
 
+    # Tombstone the provenance BEFORE touching the table. Dropping a large
+    # dir_pairs is one long uninterruptible C call, and a Ctrl-C during it is
+    # delivered at the next bytecode boundary -- if the drop came first, that
+    # interrupt would land between "table emptied" and "meta deleted",
+    # leaving an empty table wearing valid metadata.
+    if _table_exists(conn, "grouper_meta"):
+        conn.execute("DELETE FROM grouper_meta WHERE artifact='pairs'")
+        conn.commit()
+
+    parallel = jobs > 1 and n * (n - 1) // 2 >= 500_000
+    if parallel:
+        # WAL lets the workers' long signature reads coexist with the
+        # parent's incremental commits; under the default rollback journal
+        # each commit needs exclusivity and serializes against the readers
+        # (measured 6x slowdown from lock thrash). Restored on success; an
+        # interrupted run leaves the database in WAL, which every SQLite
+        # reader handles and the next run resets.
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(PAIRS_SQL)
+
     bar = Progress(n * (n - 1) // 2, "pairs", progress)
     try:
-        if jobs > 1 and n * (n - 1) // 2 >= 500_000:
+        if parallel:
             # Below ~half a million pairs the serial loop beats process
             # startup. 8 stripes per worker: interleaving balances better and
             # the bar advances more smoothly, at no measurable stripe cost.
@@ -647,7 +709,7 @@ def build_pairs(conn: sqlite3.Connection, fn_name: str, jobs: int = 1,
             stripes = [range(k, n, n_stripes) for k in range(n_stripes)]
             with ProcessPoolExecutor(max_workers=jobs,
                                      initializer=_pairs_init,
-                                     initargs=(sigs, ids, fn_name)) as ex:
+                                     initargs=(db_path, fn_name)) as ex:
                 futs = {ex.submit(_score_stripe, st):
                         sum(n - 1 - i for i in st) for st in stripes}
                 # Short-timeout wait rather than as_completed: a stripe is
@@ -667,17 +729,28 @@ def build_pairs(conn: sqlite3.Connection, fn_name: str, jobs: int = 1,
                             conn.executemany(INSERT_PAIR_SQL,
                                              rows[k:k + _INSERT_CHUNK])
                             bar.poke()
+                        conn.commit()
                         bar.add(futs[fut])
                     bar.poke()
         else:
+            # The serial path builds signatures in-process, with the load
+            # phases showing their own bars.
+            sigs = _load_signatures(conn, fn_name, progress)
+            since_commit = 0
             for i in range(n):
-                conn.executemany(INSERT_PAIR_SQL,
-                                 _score_one(ids, sigs, score, i))
+                rows = _score_one(ids, sigs, score, i)
+                conn.executemany(INSERT_PAIR_SQL, rows)
+                since_commit += len(rows)
+                if since_commit >= 10 * _INSERT_CHUNK:
+                    conn.commit()
+                    since_commit = 0
                 bar.add(n - 1 - i)
     finally:
         bar.finish()
     _set_meta(conn, "pairs", fn_name, None)
     conn.commit()
+    if parallel:
+        conn.execute("PRAGMA journal_mode=DELETE")
 
 
 # --- Grouping (stage 3, the point of the program) ------------------------------
@@ -979,8 +1052,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.index:
                 build_dir_index(conn, progress=args.progress)
             if args.pairs:
-                build_pairs(conn, args.fn or DEFAULT_FN, jobs=args.jobs,
-                            progress=args.progress)
+                build_pairs(conn, args.database, args.fn or DEFAULT_FN,
+                            jobs=args.jobs, progress=args.progress)
             if args.threshold is not None \
                     and not grouping_current(conn, args.threshold, args.fn):
                 build_groups(conn, args.threshold, args.fn)
