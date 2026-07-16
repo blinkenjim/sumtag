@@ -134,6 +134,33 @@ def _dispatch(args, rep: _Reporter, stats: RunStats) -> int:
     if args.remove:
         return _remove(roots, args, rep, stats)
 
+    # --db-prescan's read-only fetch runs before the store is opened, so a
+    # missing or non-matching summary errors out before any side effect at
+    # all -- not even creating the database file (CLAUDE.md "--db-prescan":
+    # a hard error before any work begins, never a silent fallback to the
+    # filesystem walk this flag exists to avoid).
+    prescan = None
+    if args.db_prescan:
+        try:
+            summary = store_mod.read_prescan_summary(args.database)
+        except NotImplementedError as e:
+            rep.error(f"sumtag: {e}")
+            return EXIT_ERRORS
+        if summary is None:
+            rep.error(f"sumtag: {args.database}: no stored prescan totals; "
+                      f"run --prescan --database first")
+            return EXIT_ERRORS
+        mismatch = _summary_mismatch(summary, args)
+        if mismatch is not None:
+            rep.error(f"sumtag: {args.database}: stored prescan totals do not "
+                      f"match this run ({mismatch}); run --prescan --database "
+                      f"to refresh them")
+            return EXIT_ERRORS
+        prescan = (summary.file_count, summary.total_bytes)
+        rep.info(f"using stored prescan totals: {summary.file_count} files, "
+                 f"{progress_mod.human_size(summary.total_bytes, args.si)}, "
+                 f"from {summary.created_at}")
+
     # A database is opened only when there is something to write to it: never
     # under -n, so --dry-run has no side effect at all (not even creating the
     # file). --import always carries a database (enforced by the CLI).
@@ -145,13 +172,45 @@ def _dispatch(args, rep: _Reporter, stats: RunStats) -> int:
             rep.error(f"sumtag: {e}")
             return EXIT_ERRORS
 
-    prescan = _prescan_stamp(roots, args, rep) if args.prescan else None
+    if args.prescan:
+        prescan = _prescan_stamp(roots, args, rep)
+        if store is not None:
+            store.save_prescan_summary(store_mod.PrescanSummary(
+                file_count=prescan[0], total_bytes=prescan[1],
+                roots=_normalized_roots(roots),
+                sum_mode=bool(args.sum), force=bool(args.force),
+                exclude=list(args.exclude), no_ignore=bool(args.no_ignore),
+                created_at=schema.now_iso()))
 
     try:
         return _stamp(roots, args, rep, stats, store, prescan)
     finally:
         if store is not None:
             store.close()
+
+
+def _normalized_roots(roots) -> list[str]:
+    """Scan roots as a sorted, deduplicated list of absolute paths -- the
+    stored/compared form, so /data vs /data/ vs a relative spelling of the
+    same directory never reads as a roots mismatch."""
+    return sorted({os.path.abspath(r) for r in roots})
+
+
+def _summary_mismatch(summary, args) -> str | None:
+    """Why the stored prescan summary doesn't answer this run's question,
+    or None if it matches. Every field that changes which files get counted
+    participates (CLAUDE.md "--db-prescan": match-or-error, full context)."""
+    if _normalized_roots(summary.roots) != _normalized_roots(args.directories):
+        return "different scan roots"
+    if summary.sum_mode != bool(args.sum):
+        return "different action"
+    if summary.force != bool(args.force):
+        return "--force differs"
+    if sorted(summary.exclude) != sorted(args.exclude):
+        return "--exclude patterns differ"
+    if summary.no_ignore != bool(args.no_ignore):
+        return "--no-ignore differs"
+    return None
 
 
 def _print_summary(args, rep: _Reporter, stats: RunStats, interrupted: bool) -> None:
@@ -185,7 +244,7 @@ def _print_summary(args, rep: _Reporter, stats: RunStats, interrupted: bool) -> 
         # The mode's natural headline always prints, even at zero; the other
         # line appears only if it counted something (e.g. --force --import
         # hashes; --sum over a part-stamped tree imports nothing).
-        if args.sum or not args.database:
+        if args.sum:
             pairs.append(hashed_line)
             if stats.imported:
                 pairs.append(imported_line)
@@ -237,7 +296,7 @@ def _prescan_stamp(roots, args, rep: _Reporter) -> tuple[int, int]:
     Errors are swallowed the same way: the real pass will hit and report them.
     """
     current_major = schema.major_of(schema.VERSION)
-    use_standard_decision = args.sum or not args.database
+    use_standard_decision = args.sum
     count = 0
     total_bytes = 0
     for path in walk.iter_files(roots, respect_ignore=not args.no_ignore,
@@ -321,7 +380,7 @@ def _stamp(roots, args, rep: _Reporter, stats: RunStats, store,
     current_major = schema.major_of(schema.VERSION)
     exit_code = EXIT_OK
     need_stat = args.locate
-    use_standard_decision = args.sum or not args.database
+    use_standard_decision = args.sum
     hashed_index = 0
     bytes_so_far = 0
     prescan_count, prescan_bytes = prescan if prescan is not None else (0, 0)

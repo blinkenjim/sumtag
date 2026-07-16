@@ -16,7 +16,12 @@ DESCRIPTION
        tools, with one exception built in here: the single-pass integrity
        check offered by --verify.
 
-       At least one DIRECTORY is required; there is no current-directory
+       An explicit action option is required: every run must name what it does
+       with one of --sum, --verify, --remove, --import, or --locate.  A bare
+       sumtag DIRECTORY is an error. The plain stamping action is --sum, which
+       works with or without a database (see OPTIONS).
+
+       At least one DIRECTORY is also required; there is no current-directory
        default. Any operation that scans a directory requires an explicit
        directory argument, so that a recursive operation is never aimed at the
        working directory by omission. Pass .  explicitly to scan the current
@@ -103,10 +108,11 @@ OPTIONS
               by itself; it requires at least one of --sum, --import, or
               --locate to say what to do with it.
 
-       --sum  Re-hash each file per the normal mtime-based decision (see
-              RE-HASHING ) and mirror the result, in addition to the extended
-              attribute, into the database named by --database, which this
-              option requires.
+       --sum  The stamping action: hash or re-hash each file per the normal
+              mtime-based decision (see RE-HASHING ) and write the extended
+              attribute. With --database, the result is additionally mirrored
+              into the database; without one, only the extended attribute is
+              written.
 
        --import
               Do not compute any checksum by default; only copy metadata
@@ -138,10 +144,9 @@ OPTIONS
               indicates silent corruption; a mismatch accompanied by a newer
               mtime indicates an ordinary modification whose stamp is merely
               stale. Files with no usable metadata are reported as
-              unverifiable. Cannot be combined with --database (nor --sum,
-              --import, or --locate, which all require it), or --force;
-              combining with --dry-run is a redundant no-op and is permitted.
-              See EXIT STATUS below.
+              unverifiable. Cannot be combined with --database, --sum,
+              --import, --locate, or --force; combining with --dry-run is a
+              redundant no-op and is permitted. See EXIT STATUS below.
 
        --remove
               Remove the user.sumtag xattr from every file in the tree. A
@@ -150,8 +155,8 @@ OPTIONS
               attribute happens to be present. Files with no attribute are
               left alone. Combined with --dry-run, previews which files would
               lose their stamp without removing anything. Cannot be combined
-              with --database (nor --sum, --import, or --locate, which all
-              require it), --verify, or --force.
+              with --database, --sum, --import, --locate, --verify, or
+              --force.
 
        --prescan
               Walk the tree once up front to count the files that will be
@@ -167,8 +172,29 @@ OPTIONS
        prescan path with -v; suppressed by -q), so the otherwise-silent up-
        front pass shows its own progress on a large tree. The prescan pass is
        a prediction from a separate walk, not a guarantee -- counts can drift
-       if the tree changes between the two passes. Cannot be combined with
-       --remove.
+       if the tree changes between the two passes. On a --database run (and
+       not under -n), the counted totals are also stored in the database as
+       its single prescan summary, replacing any previous one; that summary is
+       what --db-prescan later consumes. Cannot be combined with --remove.
+
+       --db-prescan
+              Like --prescan, but load the counters' totals from the summary a
+              previous --prescan --database run stored, instead of walking the
+              filesystem -- on a very large tree this replaces an hours-long
+              counting walk with a database read. The stored totals are used
+              only if they were counted for the same scan roots (compared
+              after path normalization) and under the same counting options
+              (--sum/--import/--locate, --force, --exclude, --no-ignore); a
+              missing or non-matching summary is an error before any work
+              begins (exit status 2), never a silent fall-back to a filesystem
+              walk. What was loaded is announced at startup. The progress
+              report is an approximation by consent: the per-file counter
+              tracks what actually happens this run, so it may overshoot the
+              stored total (the tree changed) or the run may finish below it
+              (some of the counted work was already done -- the typical case
+              when resuming an interrupted scan). The stored data is display-
+              only and never influences which files are hashed. Requires
+              --database; cannot be combined with --prescan or --remove.
 
        --no-ignore
               Disregard all @sumtag-ignore marker files for this run,
@@ -244,17 +270,17 @@ FILES
               MARKERS).
 
 EXAMPLES
-       Scan the current directory:
+       Stamp the current directory:
 
-       sumtag .
+       sumtag --sum .
 
-       Scan two archives:
+       Stamp two archives:
 
-       sumtag /data /backup
+       sumtag --sum /data /backup
 
        Preview without writing anything:
 
-       sumtag -n /data
+       sumtag --sum -n /data
 
        Stamp and also mirror into a SQLite database:
 
@@ -273,9 +299,15 @@ EXAMPLES
 
        sumtag --verify /backup
 
+       Resume an interrupted database run without repeating its hour-long
+       counting walk, reusing the totals the interrupted run's --prescan
+       stored:
+
+       sumtag --sum --database /var/lib/sumtag.sqlite --db-prescan /data
+
        Stamp an archive, skipping DVD rip payloads:
 
-       sumtag --exclude '*.vob' --exclude VIDEO_TS /data
+       sumtag --sum --exclude '*.vob' --exclude VIDEO_TS /data
 
 NOTES
        Timestamps are recorded in UTC with microsecond precision. Mtime
