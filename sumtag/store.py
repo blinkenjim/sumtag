@@ -342,6 +342,53 @@ class SQLiteStore:
             counts[d] = counts.get(d, 0) + 1
         return sorted(counts.items())
 
+    def iter_dir_file_paths(self, mount_path: str, dir_rel: str) -> list[str]:
+        """The rel_paths of the rows *directly* inside dir_rel (dirname
+        equality, the same pattern as delete_dir_files), sorted. Used by
+        --prune-all to check each resident file of a surviving directory.
+        """
+        row = self._conn.execute(
+            "SELECT id FROM mountpoints WHERE path = ?",
+            (mount_path,)).fetchone()
+        if row is None:
+            return []
+        if dir_rel:
+            prefix = dir_rel + "/"
+            cur = self._conn.execute(
+                "SELECT rel_path FROM files WHERE mountpoint_id = ? "
+                "AND substr(rel_path, 1, ?) = ? "
+                "AND instr(substr(rel_path, ?), '/') = 0",
+                (row[0], len(prefix), prefix, len(prefix) + 1))
+        else:
+            cur = self._conn.execute(
+                "SELECT rel_path FROM files WHERE mountpoint_id = ? "
+                "AND instr(rel_path, '/') = 0",
+                (row[0],))
+        return sorted(r[0] for r in cur)
+
+    def delete_files(self, mount_path: str, rel_paths: list[str]) -> int:
+        """Delete the rows for the given rel_paths; returns the rows deleted.
+        Committed immediately (one commit per call -- --prune-all calls this
+        once per directory, so an interrupted run keeps completed prunes,
+        same as delete_dir_files).
+        """
+        row = self._conn.execute(
+            "SELECT id FROM mountpoints WHERE path = ?",
+            (mount_path,)).fetchone()
+        if row is None:
+            return 0
+        deleted = 0
+        CHUNK = 500  # stay well under SQLite's bound-parameter limit
+        for i in range(0, len(rel_paths), CHUNK):
+            chunk = rel_paths[i:i + CHUNK]
+            cur = self._conn.execute(
+                f"DELETE FROM files WHERE mountpoint_id = ? "
+                f"AND rel_path IN ({','.join('?' * len(chunk))})",
+                [row[0]] + chunk)
+            deleted += cur.rowcount
+        self._conn.commit()
+        return deleted
+
     def delete_dir_files(self, mount_path: str, dir_rel: str) -> int:
         """Delete every files row *directly* inside dir_rel (dirname equality,
         never recursive -- see iter_file_dirs); returns the rows deleted.

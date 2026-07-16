@@ -21,7 +21,7 @@ integrity check offered by
 .PP
 An explicit action option is required: every run must name what it does with
 one of
-.BR \-\-sum ", " \-\-verify ", " \-\-remove ", " \-\-import ", " \-\-locate ", or " \-\-prune\-dirs .
+.BR \-\-sum ", " \-\-verify ", " \-\-remove ", " \-\-import ", " \-\-locate ", " \-\-prune\-dirs ", or " \-\-prune\-all .
 A bare
 .B sumtag
 .I DIRECTORY
@@ -151,7 +151,7 @@ supported. Database paths are stored relative to the file's mount point so
 they survive remounting at a different location.
 .B \-\-database
 takes no action by itself; it requires at least one of
-.BR \-\-sum ", " \-\-import ", " \-\-locate ", or " \-\-prune\-dirs
+.BR \-\-sum ", " \-\-import ", " \-\-locate ", " \-\-prune\-dirs ", or " \-\-prune\-all
 to say what to do with it.
 .TP
 .B \-\-sum
@@ -302,7 +302,9 @@ that mirrors several drives can be pruned one drive at a time while the
 others sit unplugged. The database itself must already exist; it is
 never created by this option. A directory deleted from the filesystem but
 moved elsewhere is pruned at its old location like any other deletion; files
-deleted from a directory that still exists are not noticed. Combined with
+deleted from a directory that still exists are not noticed (that is
+.BR \-\-prune\-all 's
+job). Combined with
 .BR \-\-dry\-run ,
 previews what would be pruned without deleting anything. With
 .BR \-\-progress ,
@@ -317,6 +319,28 @@ Cannot be combined with
 database, not the filesystem). See
 .B EXIT STATUS
 below.
+.TP
+.B \-\-prune\-all
+Everything
+.B \-\-prune\-dirs
+does, and additionally check every file row in directories that still
+exist, with one
+.BR lstat (2)
+each, deleting the rows of files that no longer exist or are no longer
+regular files (a path that turned into a directory or symbolic link is not
+the stamped file). The directory pass runs first, so a vanished directory
+still costs a single
+.BR stat (2),
+never one per resident row; the extra cost over
+.B \-\-prune\-dirs
+is one
+.BR lstat (2)
+per row in surviving directories only. A moved file is pruned at its old
+location like any deletion; nothing content-based is checked \(em no
+hashing, ever. Same requirements, conflicts, previews, progress counter
+(the unit becomes paths: directories plus file rows), and exit status as
+.BR \-\-prune\-dirs ;
+giving both together is redundant but not an error.
 .TP
 .B \-\-no\-ignore
 Disregard all
@@ -377,7 +401,9 @@ to match the mode;
 .B pruned
 counts directories and file rows, followed by a
 .B checked
-line with the total directories examined), any nonzero
+line with the total directories examined \(em under
+.BR \-\-prune\-all ,
+files too), any nonzero
 .BR skipped ,
 .BR errors ,
 .BR CORRUPT ,
@@ -396,7 +422,7 @@ had already completed. The process then exits
 (128 + SIGINT, the shell convention).
 .SH EXIT STATUS
 Without
-.BR \-\-verify " or " \-\-prune\-dirs ,
+.BR \-\-verify ", " \-\-prune\-dirs ", or " \-\-prune\-all ,
 sumtag exits
 .B 0
 on success and non-zero if an error prevented completion.
@@ -414,12 +440,13 @@ one or more checksum mismatches (corruption) were found.
 unreadable files or other errors prevented a complete check.
 .PP
 With
-.BR \-\-prune\-dirs ,
+.BR \-\-prune\-dirs " or " \-\-prune\-all ,
 the same scheme, applied to staleness:
 .B 0
 means nothing was stale (the database already matches the filesystem),
 .B 1
-means stale directories were found and pruned (or would be pruned, under
+means stale directories or file rows were found and pruned (or would be
+pruned, under
 .BR \-\-dry\-run ),
 and
 .B 2

@@ -11,7 +11,7 @@ import os
 import sys
 from dataclasses import dataclass
 
-from stat import S_ISDIR
+from stat import S_ISDIR, S_ISREG
 
 from . import decide, hashing, progress as progress_mod, schema, store as store_mod, walk, xattr
 from .store import StatData
@@ -42,9 +42,10 @@ class RunStats:
     removed: int = 0
     skipped: int = 0
     errors: int = 0
-    checked_dirs: int = 0   # --prune-dirs: directories whose check completed
-    pruned_dirs: int = 0    # --prune-dirs: directories found gone
-    pruned_files: int = 0   # --prune-dirs: file rows deleted (or would-delete)
+    checked_dirs: int = 0   # --prune-dirs/-all: directories whose check completed
+    pruned_dirs: int = 0    # --prune-dirs/-all: directories found gone
+    pruned_files: int = 0   # --prune-dirs/-all: file rows deleted (or would-delete)
+    checked_files: int = 0  # --prune-all: files individually checked
 
 
 class _Reporter:
@@ -139,8 +140,9 @@ def _dispatch(args, rep: _Reporter, stats: RunStats) -> int:
     if args.remove:
         return _remove(roots, args, rep, stats)
 
-    if args.prune_dirs:
-        return _prune_dirs(roots, args, rep, stats)
+    if args.prune_dirs or args.prune_all:
+        return _prune_dirs(roots, args, rep, stats,
+                           prune_files=args.prune_all)
 
     # --db-prescan's read-only fetch runs before the store is opened, so a
     # missing or non-matching summary errors out before any side effect at
@@ -235,11 +237,14 @@ def _print_summary(args, rep: _Reporter, stats: RunStats, interrupted: bool) -> 
     dirs_word = lambda n: f"{n} director{'y' if n == 1 else 'ies'}"
     pairs: list[tuple[str, str]] = []
 
-    if args.prune_dirs:
+    if args.prune_dirs or args.prune_all:
         verb = "would prune" if args.dry_run else "pruned"
         pairs.append((verb, f"{dirs_word(stats.pruned_dirs)}, "
                             f"{plural(stats.pruned_files, 'file row')}"))
-        pairs.append(("checked", dirs_word(stats.checked_dirs)))
+        checked = dirs_word(stats.checked_dirs)
+        if args.prune_all:
+            checked += f", {plural(stats.checked_files, 'file')}"
+        pairs.append(("checked", checked))
     elif args.remove:
         verb = "would remove" if args.dry_run else "removed"
         pairs.append((verb, plural(stats.removed, "stamp")))
@@ -523,8 +528,9 @@ def _verify(roots, args, rep: _Reporter, stats: RunStats,
     return EXIT_OK
 
 
-def _prune_dirs(roots, args, rep: _Reporter, stats: RunStats) -> int:
-    """Reconcile the database with a changed filesystem (--prune-dirs).
+def _prune_dirs(roots, args, rep: _Reporter, stats: RunStats,
+                prune_files: bool = False) -> int:
+    """Reconcile the database with a changed filesystem (--prune-dirs/-all).
 
     Checks every directory the database knows under the given roots -- the
     distinct dirnames of its file rows -- and deletes the rows of directories
@@ -535,6 +541,13 @@ def _prune_dirs(roots, args, rep: _Reporter, stats: RunStats) -> int:
     never modified, and nothing flows database->filesystem (the
     sink-never-a-source principle is untouched; this is maintenance *of*
     the sink toward filesystem truth).
+
+    With ``prune_files`` (--prune-all), a directory that still exists gets
+    its resident file rows checked too, one lstat each, deleting the rows
+    of files that no longer exist (or are no longer regular files) -- the
+    per-file staleness --prune-dirs deliberately skips. The directory pass
+    still runs first, so a vanished directory costs one stat, never one
+    per file. Row deletes stay batched and committed per directory.
 
     The unmounted-drive guard: every scan root must exist (exit 2 before
     the database is even opened -- an absent or elsewhere-mounted drive
@@ -578,7 +591,16 @@ def _prune_dirs(roots, args, rep: _Reporter, stats: RunStats) -> int:
             for dir_rel, count in found:
                 candidates[(mount, dir_rel)] = count
 
-        ind = progress_mod.make_count(len(candidates), args.progress)
+        # --prune-all's progress denominator counts the file checks too (a
+        # gone directory's residents tick as done in one lump -- their check
+        # was the directory's).
+        total = len(candidates)
+        unit = "dirs"
+        if prune_files:
+            total += sum(candidates.values())
+            unit = "paths"
+        done = 0
+        ind = progress_mod.make_count(total, args.progress, unit)
         try:
             for (mount, dir_rel), count in sorted(candidates.items()):
                 path = os.path.join(mount, dir_rel) if dir_rel else mount
@@ -600,27 +622,76 @@ def _prune_dirs(roots, args, rep: _Reporter, stats: RunStats) -> int:
                 rows = lambda n: f"{n} file row{'' if n == 1 else 's'}"
                 if not gone:
                     rep.detail(f"skip   {path} (exists)")
+                    if prune_files:
+                        done += _prune_dir_residents(
+                            store, mount, dir_rel, args, rep, stats, ind)
                 elif args.dry_run:
                     rep.announce(path, f"would prune {path} ({rows(count)})")
                     stats.pruned_dirs += 1
                     stats.pruned_files += count
+                    done += count if prune_files else 0
                 else:
                     deleted = store.delete_dir_files(mount, dir_rel)
                     rep.announce(path, f"prune  {path} ({rows(deleted)})")
                     stats.pruned_dirs += 1
                     stats.pruned_files += deleted
+                    done += count if prune_files else 0
                 stats.checked_dirs += 1
+                done += 1
                 if ind is not None:
-                    ind(stats.checked_dirs)
+                    ind(done)
         finally:
             if ind is not None:
                 ind.finish()
     finally:
         store.close()
 
-    if exit_code == EXIT_OK and stats.pruned_dirs:
-        return EXIT_CORRUPTION  # 1: stale directories found -- gateable
+    if stats.errors:
+        exit_code = EXIT_ERRORS  # helper errors escalate the same way
+    if exit_code == EXIT_OK and (stats.pruned_dirs or stats.pruned_files):
+        return EXIT_CORRUPTION  # 1: something stale found -- gateable
     return exit_code
+
+
+def _prune_dir_residents(store, mount: str, dir_rel: str, args,
+                         rep: _Reporter, stats: RunStats, ind) -> int:
+    """--prune-all's file pass for one surviving directory: lstat each
+    resident file row, delete the rows of files that no longer exist (or
+    are no longer regular files -- a path that turned into a directory or
+    symlink is not the stamped file). Deletes are batched into one commit
+    per directory, matching delete_dir_files. Returns the rows checked,
+    for the caller's progress counter.
+    """
+    gone_rels: list[str] = []
+    checked = 0
+    for rel_path in store.iter_dir_file_paths(mount, dir_rel):
+        fpath = os.path.join(mount, rel_path)
+        try:
+            fst = os.lstat(fpath)
+            fgone = not S_ISREG(fst.st_mode)
+        except (FileNotFoundError, NotADirectoryError):
+            fgone = True
+        except OSError as e:
+            stats.errors += 1
+            if ind is not None:
+                ind.interrupt()
+            rep.error(f"sumtag: {fpath}: {e}")
+            continue
+        checked += 1
+        stats.checked_files += 1
+        if not fgone:
+            rep.detail(f"skip   {fpath} (exists)")
+            continue
+        if ind is not None:
+            ind.interrupt()
+        verb = "would prune" if args.dry_run else "prune "
+        rep.announce(fpath, f"{verb} {fpath} (file row)")
+        gone_rels.append(rel_path)
+    if gone_rels and not args.dry_run:
+        stats.pruned_files += store.delete_files(mount, gone_rels)
+    else:
+        stats.pruned_files += len(gone_rels)
+    return checked
 
 
 def _remove(roots, args, rep: _Reporter, stats: RunStats) -> int:
