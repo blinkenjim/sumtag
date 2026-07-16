@@ -16,7 +16,7 @@ Usage (pipeline order):
                                               #   store the pairs
     grouper.py --database DB --index [--progress]          # stage 1 alone
     grouper.py --database DB --pairs [--fn N] [--jobs N] [--progress]
-                                              # stage 2 alone
+                                     [--max-df N]         # stage 2 alone
     grouper.py --database DB --threshold 0.7  # stage 3: build + persist groups
                                               #   (skipped if the stored grouping
                                               #   is already current), then
@@ -94,15 +94,39 @@ Comparison functions:
     table ("no stored pairs") until a --pairs run completes. The pair set
     produced is identical at any --jobs value.
 
-    --progress adds a live bar (stderr) to the build stages, following
-    sumtag's conventions: opt-in, appears once a stage has run 2 seconds,
-    redrawn in place, cleared on completion, suppressed when stderr is not a
-    terminal. Redraws are time-based (a few per second), not event-based:
-    the bar appears and keeps ticking even while every worker is mid-stripe
-    and no result has landed yet. --pairs shows its phases in turn -- file
-    rows loaded, directories signed, then pairs scored -- so a large corpus
-    is never silently "warming up". The denominator is known a priori -- N
-    files for --index, N*(N-1)/2 comparisons for --pairs.
+Candidate nomination (--max-df):
+
+    Exhaustive --pairs scores all N*(N-1)/2 pairs -- infeasible at millions
+    of directories (a 4.7M-dir corpus is ~11 trillion comparisons). Above
+    ~50M comparisons (or with an explicit --max-df N), --pairs instead
+    nominates candidates from an inverted index of signature keys: only
+    pairs sharing at least one key present in no more than N directories
+    (default 1000) are scored. Nominated pairs get EXACT scores, computed
+    from full signatures -- the cap governs who gets looked at, never what
+    a look sees. What is given up: pairs whose only overlap is ubiquitous
+    keys (.DS_Store and friends), whose similarity is necessarily tiny --
+    except for degenerate boilerplate-only directories (two dirs holding
+    nothing but identical .DS_Store files score 1.0 exhaustively and are
+    not nominated; treating those as discoveries is noise anyway). Every
+    registered comparison function scores 0 for key-disjoint signatures, so
+    with a large enough N nomination is provably lossless. --max-df 0
+    forces exhaustive at any size. Candidate mode is announced on stderr
+    and the cap is recorded in grouper_meta -- approximation by consent,
+    never silently.
+
+Progress (--progress):
+
+    A live bar (stderr) on the build stages, following sumtag's
+    conventions: opt-in, appears once a stage has run 2 seconds, redrawn in
+    place, cleared on completion, suppressed when stderr is not a terminal.
+    Redraws are time-based (a few per second), not event-based: the bar
+    appears and keeps ticking even while every worker is mid-stripe and no
+    result has landed yet. --pairs shows its phases in turn -- file rows
+    loaded, directories signed, then pairs scored -- so a large corpus is
+    never silently "warming up". The denominator is known a priori -- N
+    files for --index, N*(N-1)/2 comparisons for exhaustive --pairs; under
+    candidate nomination the pair count isn't knowable up front, so the bar
+    counts directories completed out of N instead.
 
 Caveats: derived tables go stale when sumtag rescans (rerun the pipeline);
 dir_files references files.rowid, which VACUUM can renumber -- both fine for
@@ -155,30 +179,38 @@ def _now_iso() -> str:
 
 
 def _set_meta(conn: sqlite3.Connection, artifact: str, fn: str,
-              threshold: float | None) -> None:
-    """Record provenance for a built artifact ('pairs' or 'groups')."""
+              threshold: float | None, max_df: int | None = None) -> None:
+    """Record provenance for a built artifact ('pairs' or 'groups').
+
+    max_df is the candidate-nomination cap the pair table was built with;
+    NULL means exhaustive all-pairs. Older databases predate the column, so
+    it is added in place when missing.
+    """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS grouper_meta (
           artifact  TEXT PRIMARY KEY,
           fn        TEXT NOT NULL,
           threshold REAL,              -- NULL for the pair table
-          built_at  TEXT NOT NULL
+          built_at  TEXT NOT NULL,
+          max_df    INTEGER            -- nomination cap; NULL = exhaustive
         )""")
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(grouper_meta)")}
+    if "max_df" not in cols:
+        conn.execute("ALTER TABLE grouper_meta ADD COLUMN max_df INTEGER")
     conn.execute("""
-        INSERT INTO grouper_meta(artifact, fn, threshold, built_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO grouper_meta(artifact, fn, threshold, built_at, max_df)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(artifact) DO UPDATE SET
             fn=excluded.fn, threshold=excluded.threshold,
-            built_at=excluded.built_at
-        """, (artifact, fn, threshold, _now_iso()))
+            built_at=excluded.built_at, max_df=excluded.max_df
+        """, (artifact, fn, threshold, _now_iso(), max_df))
 
 
 def _get_meta(conn: sqlite3.Connection, artifact: str):
     if not _table_exists(conn, "grouper_meta"):
         return None
     return conn.execute(
-        "SELECT fn, threshold, built_at FROM grouper_meta WHERE artifact=?",
-        (artifact,)).fetchone()
+        "SELECT * FROM grouper_meta WHERE artifact=?", (artifact,)).fetchone()
 
 
 # --- Progress bar --------------------------------------------------------------
@@ -410,6 +442,15 @@ def ls(conn: sqlite3.Connection, path: str) -> int:
 # Signatures must be plain picklable values (dicts/Counters of str tuples,
 # never sqlite3.Row), since --jobs ships them to worker processes.
 # Registered by name in COMPARISONS; swapped with --fn.
+#
+# Nomination invariant: score(a, b) > 0 REQUIRES that a and b share at
+# least one signature key (dict/Counter key). All registered functions
+# satisfy it -- multiset Jaccard needs a common element, name-score needs a
+# matched basename -- and --max-df candidate nomination depends on it: the
+# inverted index is built over signature keys, so a pair sharing no key is
+# safe to never score. A future function that can score key-disjoint
+# signatures above zero would silently break nomination; don't write one
+# without revisiting _kept_index.
 
 def sig_digest(files) -> Counter:
     """Signature: multiset of (algo, digest) -- content only, names ignored.
@@ -563,6 +604,45 @@ INSERT_PAIR_SQL = \
 
 _INSERT_CHUNK = 100_000     # rows per executemany between progress ticks
 
+# Exhaustive scoring is exact and cheap enough up to roughly this many
+# comparisons (~10k dirs, well under a minute); past it, an unflagged run
+# switches to candidate nomination with DEFAULT_MAX_DF.
+_EXHAUSTIVE_MAX = 50_000_000
+DEFAULT_MAX_DF = 1000
+
+
+def _kept_index(sigs: dict, max_df: int) -> dict:
+    """Invert signatures into token -> sorted [dir_id, ...] for nomination.
+
+    Tokens are signature keys (see the nomination invariant above). Tokens
+    in a single directory nominate nothing; tokens in more than max_df
+    directories are the ubiquitous-noise case the cap exists to exclude --
+    a token in k dirs witnesses k*(k-1)/2 candidate pairs, so one
+    .DS_Store-grade token would reinstate the all-pairs blowup by itself.
+    """
+    index: dict = {}
+    for d, sig in sigs.items():
+        for tok in sig.keys():
+            index.setdefault(tok, []).append(d)
+    return {t: sorted(ds) for t, ds in index.items()
+            if 2 <= len(ds) <= max_df}
+
+
+def _candidate_partners(index: dict, sig, d: int) -> list:
+    """Directories later than d sharing at least one kept token with it.
+
+    Deduplicated here (a pair sharing five rare names is nominated once)
+    and sorted so the scoring order is deterministic. The d < partner
+    ordering makes each unordered pair the responsibility of exactly one
+    outer directory, mirroring the exhaustive triangular loop.
+    """
+    partners: set = set()
+    for tok in sig.keys():
+        ds = index.get(tok)
+        if ds:
+            partners.update(e for e in ds if e > d)
+    return sorted(partners)
+
 # Worker-process state, installed by _pairs_init. Each worker loads the
 # file rows and builds the signature table ITSELF, from its own read-only
 # connection -- nothing large ever crosses the spawn pipe. The first cut
@@ -579,6 +659,7 @@ _INSERT_CHUNK = 100_000     # rows per executemany between progress ticks
 _SIGS: dict | None = None
 _IDS: list | None = None
 _SCORE = None
+_INDEX: dict | None = None      # nomination index; None = exhaustive mode
 
 
 def _load_signatures(conn: sqlite3.Connection, fn_name: str,
@@ -614,8 +695,9 @@ def _load_signatures(conn: sqlite3.Connection, fn_name: str,
     return sigs
 
 
-def _pairs_init(db_path: str, fn_name: str) -> None:
-    global _SIGS, _IDS, _SCORE
+def _pairs_init(db_path: str, fn_name: str, max_df: int) -> None:
+    """max_df of 0 means exhaustive mode (no nomination index)."""
+    global _SIGS, _IDS, _SCORE, _INDEX
     conn = connect(db_path)                # read-only; closed after the load
     try:
         _SIGS = _load_signatures(conn, fn_name)
@@ -623,14 +705,14 @@ def _pairs_init(db_path: str, fn_name: str) -> None:
         conn.close()
     _IDS = sorted(_SIGS)
     _SCORE = COMPARISONS[fn_name][1]
+    _INDEX = _kept_index(_SIGS, max_df) if max_df else None
 
 
-def _score_one(ids: list, sigs: dict, score, i: int) -> list:
-    """All nonzero pairs of ids[i] against every later dir -- one outer row."""
-    a = ids[i]
+def _score_one(sigs: dict, score, a: int, partners) -> list:
+    """All nonzero pairs of dir a against the given later dirs."""
     sig_a = sigs[a]
     out = []
-    for b in ids[i + 1:]:
+    for b in partners:
         s = score(sig_a, sigs[b])
         if s > 0.0:
             out.append((a, b, s))
@@ -640,19 +722,27 @@ def _score_one(ids: list, sigs: dict, score, i: int) -> list:
 def _score_stripe(outer: range) -> list:
     out = []
     for i in outer:
-        out.extend(_score_one(_IDS, _SIGS, _SCORE, i))
+        a = _IDS[i]
+        partners = _IDS[i + 1:] if _INDEX is None \
+            else _candidate_partners(_INDEX, _SIGS[a], a)
+        out.extend(_score_one(_SIGS, _SCORE, a, partners))
     return out
 
 
 def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
-                jobs: int = 1, progress: bool = False) -> None:
-    """Compare every directory to every other; store all nonzero pairs.
+                jobs: int = 1, progress: bool = False,
+                max_df: int | None = None) -> None:
+    """Score directory pairs and store all nonzero similarities.
 
-    The N^2/2 comparisons are the expensive part, so every similarity > 0 is
-    kept regardless of any threshold -- the threshold stays a cheap knob at
-    grouping time. Zero-similarity pairs are omitted: they can never form or
-    join a group, so their rows would buy nothing (and on real corpora they
-    are the overwhelming majority).
+    Exhaustively (every pair, the N^2/2 loop) on smaller corpora, or via
+    candidate nomination above _EXHAUSTIVE_MAX comparisons -- see the module
+    docstring's "Candidate nomination" section. max_df: None = auto, 0 =
+    force exhaustive, N = force nomination at cap N. The comparisons are
+    the expensive part, so every similarity > 0 is kept regardless of any
+    threshold -- the threshold stays a cheap knob at grouping time.
+    Zero-similarity pairs are omitted: they can never form or join a group,
+    so their rows would buy nothing (and on real corpora they are the
+    overwhelming majority).
 
     The scoring loop fans out across `jobs` worker processes, each of which
     loads its own signature table from the database (see _pairs_init for why
@@ -688,7 +778,17 @@ def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
         conn.execute("DELETE FROM grouper_meta WHERE artifact='pairs'")
         conn.commit()
 
-    parallel = jobs > 1 and n * (n - 1) // 2 >= 500_000
+    total = n * (n - 1) // 2
+    if max_df is None:
+        cap = DEFAULT_MAX_DF if total > _EXHAUSTIVE_MAX else 0
+    else:
+        cap = max_df                    # 0 = exhaustive forced
+    if cap:
+        print(f"grouper: candidate nomination, max-df {cap} "
+              f"(pairs sharing only commoner tokens are not scored)",
+              file=sys.stderr)
+
+    parallel = jobs > 1 and total >= 500_000
     if parallel:
         # WAL lets the workers' long signature reads coexist with the
         # parent's incremental commits; under the default rollback journal
@@ -699,7 +799,10 @@ def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
         conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(PAIRS_SQL)
 
-    bar = Progress(n * (n - 1) // 2, "pairs", progress)
+    # Exhaustively the work is exactly N*(N-1)/2 comparisons; under
+    # nomination the comparison count isn't knowable up front, so the bar
+    # counts outer directories completed instead.
+    bar = Progress(n if cap else total, "dirs" if cap else "pairs", progress)
     try:
         if parallel:
             # Below ~half a million pairs the serial loop beats process
@@ -709,9 +812,10 @@ def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
             stripes = [range(k, n, n_stripes) for k in range(n_stripes)]
             with ProcessPoolExecutor(max_workers=jobs,
                                      initializer=_pairs_init,
-                                     initargs=(db_path, fn_name)) as ex:
+                                     initargs=(db_path, fn_name, cap)) as ex:
                 futs = {ex.submit(_score_stripe, st):
-                        sum(n - 1 - i for i in st) for st in stripes}
+                        (len(st) if cap else sum(n - 1 - i for i in st))
+                        for st in stripes}
                 # Short-timeout wait rather than as_completed: a stripe is
                 # 1/(jobs*8) of the whole run, which can be minutes -- the
                 # bar must appear and keep ticking before the first one
@@ -736,18 +840,22 @@ def build_pairs(conn: sqlite3.Connection, db_path: str, fn_name: str,
             # The serial path builds signatures in-process, with the load
             # phases showing their own bars.
             sigs = _load_signatures(conn, fn_name, progress)
+            index = _kept_index(sigs, cap) if cap else None
             since_commit = 0
             for i in range(n):
-                rows = _score_one(ids, sigs, score, i)
+                a = ids[i]
+                partners = ids[i + 1:] if index is None \
+                    else _candidate_partners(index, sigs[a], a)
+                rows = _score_one(sigs, score, a, partners)
                 conn.executemany(INSERT_PAIR_SQL, rows)
                 since_commit += len(rows)
                 if since_commit >= 10 * _INSERT_CHUNK:
                     conn.commit()
                     since_commit = 0
-                bar.add(n - 1 - i)
+                bar.add(1 if cap else n - 1 - i)
     finally:
         bar.finish()
-    _set_meta(conn, "pairs", fn_name, None)
+    _set_meta(conn, "pairs", fn_name, None, cap or None)
     conn.commit()
     if parallel:
         conn.execute("PRAGMA journal_mode=DELETE")
@@ -1016,6 +1124,13 @@ def main(argv: list[str] | None = None) -> int:
                              "stages (--index/--pairs): appears once a stage "
                              "has run 2s, cleared when done; suppressed when "
                              "stderr is not a terminal")
+    parser.add_argument("--max-df", type=int, metavar="N", default=None,
+                        help="--pairs: score only candidate pairs sharing "
+                             "at least one signature token present in at "
+                             "most N directories, instead of exhaustive "
+                             "all-pairs; 0 forces exhaustive. Default: "
+                             "exhaustive up to ~10k dirs, then candidates "
+                             f"with N={DEFAULT_MAX_DF}")
     parser.add_argument("--ls", metavar="DIR",
                         help="list the files in DIR (absolute or "
                              "mount-relative) using the directory index")
@@ -1037,6 +1152,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--threshold must be between 0.0 and 1.0")
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
+    if args.max_df is not None and args.max_df < 0:
+        parser.error("--max-df must be 0 (exhaustive) or a positive cap")
     if args.dups and args.top is not None:
         parser.error("--dups and --top are mutually exclusive")
     if args.top is not None and args.top < 1:
@@ -1053,7 +1170,8 @@ def main(argv: list[str] | None = None) -> int:
                 build_dir_index(conn, progress=args.progress)
             if args.pairs:
                 build_pairs(conn, args.database, args.fn or DEFAULT_FN,
-                            jobs=args.jobs, progress=args.progress)
+                            jobs=args.jobs, progress=args.progress,
+                            max_df=args.max_df)
             if args.threshold is not None \
                     and not grouping_current(conn, args.threshold, args.fn):
                 build_groups(conn, args.threshold, args.fn)
