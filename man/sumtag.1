@@ -1,4 +1,4 @@
-.TH SUMTAG 1 "June 2026" "sumtag 0.1.0" "User Commands"
+.TH SUMTAG 1 "July 2026" "sumtag 0.1.0" "User Commands"
 .SH NAME
 sumtag \- stamp files with an XXH3 checksum and metadata for corruption and duplicate detection
 .SH SYNOPSIS
@@ -428,6 +428,21 @@ Stamp an archive, skipping DVD rip payloads:
 .PP
 .EX
 sumtag \-\-sum \-\-exclude '*.vob' \-\-exclude VIDEO_TS /data
+.EE
+.PP
+Watch a long run: an up-front counting walk drives per-file
+.IR nnn / mmm
+counters, and slow files get a live progress bar:
+.PP
+.EX
+sumtag \-\-sum \-\-prescan \-\-progress /data
+.EE
+.PP
+Preview which files would lose their stamp, then really remove them:
+.PP
+.EX
+sumtag \-\-remove \-n /scratch
+sumtag \-\-remove /scratch
 .EE
 .SH NOTES
 Timestamps are recorded in UTC with microsecond precision. Mtime comparisons

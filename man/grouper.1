@@ -1,0 +1,336 @@
+.TH GROUPER 1 "July 2026" "sumtag 0.1.0" "User Commands"
+.SH NAME
+grouper.py \- find groups of directories with identical or similar contents in a sumtag database
+.SH SYNOPSIS
+.B grouper.py
+.B \-\-database
+.I DB
+.RI [ ACTION ]
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B grouper.py
+is an experimental companion program to
+.BR sumtag (1).
+It reads the
+.BR files / mountpoints
+tables of a sumtag SQLite database and finds groups of directories whose
+contents are identical or nearly so \(em for example, two slightly different
+copies of the same project, or the five scattered backups of a family video
+archive. It never touches files, extended attributes, or anything else on
+disk: everything it knows comes from the database, and everything it builds
+(its derived tables) lives inside the same database file.
+.PP
+.B \-\-database
+is required on every invocation. With no action flags, the stored grouping is
+printed (see THE REPORT). Building that grouping is a three-stage pipeline,
+each stage persisted so later stages are cheap to re-run:
+.TP
+.B \-\-index
+Stage 1: distill the file table into the distinct directories that directly
+contain at least one visible stamped file. Direct children only, deliberately:
+a directory's own file listing is its signature. Two junk filters apply, each
+reporting its dropped count on standard error: a directory whose path
+contains a hidden (dot-prefixed) component \(em
+.BR .git /hooks,
+.BR .build /checkouts,
+anything under
+.B .Trash\-*
+\(em is never indexed at all, and a directory whose direct files are all
+hidden is dropped.
+.B \-\-no\-junk
+disables both.
+.TP
+.B \-\-pairs
+Stage 2: compare every directory to every other with the selected comparison
+function and store every nonzero similarity. This N\(S2/2 comparison is the
+expensive part, so the similarity threshold is deliberately not applied here
+\(em regrouping at a different threshold recomputes nothing.
+.TP
+.BI \-\-threshold " X"
+Stage 3: walk the stored pairs best-first and partition directories into
+groups, taking
+.I X
+(0.0\-1.0) as the similar-enough bar. Each directory gets exactly one
+placement decision and groups never merge, so the result is a true partition.
+The grouping is persisted, and the run ends with the report. If the stored
+grouping is already current for this threshold, the rebuild is skipped.
+.PP
+.B \-\-prep
+runs stages 1 and 2 together, and stages combine freely in one invocation
+.RB ( \-\-prep " " \-\-threshold " 0.7)."
+An interrupted
+.B \-\-pairs
+keeps its completed work, but its provenance row is written only on success,
+so a partial pair table is refused by
+.B \-\-threshold
+rather than silently grouped from.
+.SH OPTIONS
+.TP
+.BI \-\-database " DB"
+Path to the sumtag SQLite database. Required.
+.TP
+.B \-\-prep
+Stages 1+2:
+.B \-\-index
+then
+.BR \-\-pairs .
+.TP
+.B \-\-index
+Stage 1 alone: (re)build the directory index. Silent on success.
+.TP
+.B \-\-no\-junk
+Disable
+.BR \-\-index 's
+junk filtering for the run: directories under hidden path components and
+all-hidden directories are indexed like any other. The escape hatch for
+deliberately grouping hidden trees \(em for example, asking whether trash
+contents are duplicated elsewhere before emptying the trash. The filtering
+regime the index was built under is recorded in the database.
+.TP
+.B \-\-pairs
+Stage 2 alone: score and store directory pairs. Silent on success.
+.TP
+.BI \-\-threshold " X"
+Stage 3: build and persist the grouping at similarity bar
+.IR X ,
+then report it. Refused if
+.I X
+is below the pair table's stored
+.B \-\-min\-sim
+floor (the stored pairs could not answer honestly).
+.TP
+.BI \-\-fn " NAME"
+Comparison function for
+.BR \-\-pairs / \-\-compare .
+One of:
+.B digest
+(content only \(em renames are free),
+.B name\-digest
+(all-or-nothing per name-and-digest pair), or
+.B name\-score
+(the default; name-anchored partial credit: one point for a shared basename,
+two more if the digests also agree).
+.TP
+.BI \-\-jobs " N"
+Worker processes for
+.B \-\-pairs
+scoring (default: all CPUs); 1 disables multiprocessing. Each worker loads its
+own full copy of the signature table, so on a big corpus this is a memory
+knob as much as a speed knob. The stored pair set is identical at any value.
+.TP
+.B \-\-progress
+Live progress bar on standard error for the build stages, following the
+.BR sumtag (1)
+conventions: appears once a stage has run two seconds, redrawn in place,
+cleared on completion, suppressed when standard error is not a terminal.
+Shows work items done/total with rate, percentage, elapsed time, and ETA.
+.TP
+.BI \-\-max\-df " N"
+For
+.BR \-\-pairs :
+instead of exhaustive all-pairs, score only candidate pairs sharing at least
+one signature token (basename or digest, per the comparison function) present
+in at most
+.I N
+directories. Nominated pairs get exact scores \(em the cap governs who gets
+looked at, never what a look sees; what is lost is only pairs whose sole
+overlap is ubiquitous tokens, whose similarity is necessarily tiny. By
+default, exhaustive comparison is used up to roughly ten thousand
+directories, then candidate nomination with
+.IR N =1000;
+0 forces exhaustive at any size. Candidate mode is announced on standard
+error and recorded in the database.
+.TP
+.BI \-\-min\-sim " X"
+For
+.BR \-\-pairs :
+store only pairs scoring at least
+.I X
+(0.0\-1.0). By default every nonzero pair is stored, which keeps
+.B \-\-threshold
+a free exploratory knob \(em but on an archive-scale corpus the weak tail
+dwarfs everything interesting. The floor governs what is kept, never what is
+looked at; it is recorded in the database, and a later
+.B \-\-threshold
+below it is refused with a rerun hint.
+.TP
+.BI \-\-sort " KEY"
+Order for the report's groups. One of:
+.B bond
+(default) \(em creation order, strongest bonds first;
+.B files
+\(em each group's total stamped-file count, largest first;
+.B size
+\(em each group's total byte size, largest first;
+.B tree\-size
+\(em like
+.B size
+but over each member directory's entire subtree. See THE REPORT.
+.TP
+.BI \-\-ls " DIR"
+List the files the index records for one directory (absolute or
+mount-relative path).
+.TP
+.BI \-\-compare " DIR_A DIR_B"
+Print the similarity (0.0\-1.0) of two directories' contents under the
+selected comparison function.
+.TP
+.B \-\-dups
+Report duplicate files (same digest) across the whole database \(em files,
+not directories.
+.TP
+.BR \-\-top " [\fIN\fP]"
+Report the
+.I N
+(default 1) most frequently occurring checksums and their files, excluding
+empty files.
+.TP
+.BI \-\-min " N"
+For
+.BR \-\-dups / \-\-top :
+only report groups of at least
+.I N
+files (default 2).
+.SH THE REPORT
+The report opens with the grouping's provenance (comparison function,
+threshold, build time), then prints each group with its member directories:
+.PP
+.EX
+group 17  (2 directories, 1852 files, 908.4GiB in tree, best pair 1.000)
+    /mnt/backup/recovered/media
+    /mnt/backup/master/media
+.EE
+.PP
+.B best pair
+is the highest stored similarity between any two members \(em the bond that
+says how alike the group is at its closest point. Members are listed
+alphabetically by path.
+.PP
+.B \-\-sort
+is display-time only: nothing is stored or rebuilt, and group numbering does
+not change. The default
+.B bond
+order lists groups in creation order, strongest bonds first. The
+.BR files ", " size ", and " tree\-size
+orders list the largest groups first and add each group's file count and
+byte total to its header line.
+.B size
+counts the member directories' direct children \(em the same files the
+similarity was scored over \(em while
+.B tree\-size
+rolls up each member's entire subtree (marked
+.B in tree
+in the header): members nested under another member of the same group are
+skipped so nothing is double-counted, and the totals include stamped files
+the index itself never looked at (hidden files, dropped junk directories).
+Under
+.BR tree\-size ,
+the same bytes can legitimately appear in several groups' totals, so
+report-wide sums are not meaningful.
+.PP
+Byte totals read the
+.B size
+column that a
+.B sumtag \-\-locate
+run populates. If some files lack sizes, the report proceeds with a note on
+standard error that totals undercount; if all do, a size sort is refused
+outright rather than producing a silently meaningless ordering.
+.SH EXAMPLES
+Build everything and group at a moderate similarity bar, in one invocation:
+.PP
+.EX
+grouper.py \-\-database /var/lib/sumtag.sqlite \-\-prep \-\-threshold 0.7
+.EE
+.PP
+Tighten the grouping to near-identical directories only. The expensive pair
+table is already stored, so this regroups in seconds and recomputes nothing:
+.PP
+.EX
+grouper.py \-\-database /var/lib/sumtag.sqlite \-\-threshold 0.9999
+.EE
+.PP
+Print the stored grouping again, touching nothing:
+.PP
+.EX
+grouper.py \-\-database /var/lib/sumtag.sqlite
+.EE
+.PP
+The space-hunting view: the same grouping ordered by each group's total
+subtree size, so the report leads with the largest duplicated trees \(em
+typically worth capturing to a file:
+.PP
+.EX
+grouper.py \-\-database /var/lib/sumtag.sqlite \-\-sort tree\-size > groups.out
+.EE
+.PP
+Rebuild the pair table on an archive-scale corpus: candidate nomination
+(share a token seen in at most 1000 directories), keep only pairs scoring at
+least 0.5, cap worker memory at four processes, and watch progress:
+.PP
+.EX
+grouper.py \-\-database big.sqlite \-\-pairs \-\-max\-df 1000 \e
+    \-\-min\-sim 0.5 \-\-jobs 4 \-\-progress
+.EE
+.PP
+Ask why (or how much) two specific directories resemble each other, and see
+what the index recorded for one of them:
+.PP
+.EX
+grouper.py \-\-database db.sqlite \-\-compare /mnt/a/proj /mnt/b/proj
+grouper.py \-\-database db.sqlite \-\-ls /mnt/a/proj
+.EE
+.PP
+Duplicate files rather than directories \(em every digest shared by at least
+three files, then the ten most frequent checksums:
+.PP
+.EX
+grouper.py \-\-database db.sqlite \-\-dups \-\-min 3
+grouper.py \-\-database db.sqlite \-\-top 10
+.EE
+.PP
+Content-only grouping, so wholesale renames still match:
+.PP
+.EX
+grouper.py \-\-database db.sqlite \-\-pairs \-\-fn digest
+grouper.py \-\-database db.sqlite \-\-threshold 0.9
+.EE
+.PP
+Rebuild everything with junk filtering off, to ask whether hidden trees
+(here, trash contents) are duplicated elsewhere:
+.PP
+.EX
+grouper.py \-\-database db.sqlite \-\-no\-junk \-\-prep \-\-threshold 0.9
+.EE
+.SH EXIT STATUS
+.B 0
+on success;
+.B 1
+if an error prevented the request from being answered (not a sumtag database,
+no stored pairs or grouping yet, a
+.B \-\-threshold
+below the stored
+.B \-\-min\-sim
+floor, or a size sort with no stored sizes).
+.SH CAVEATS
+The derived tables are snapshots: when sumtag rescans and the file table
+changes, rerun the pipeline
+.RB ( \-\-prep ,
+then
+.BR \-\-threshold ).
+The report prints a note when the pair table is newer than the stored
+grouping, and when the directory index is newer than the pair table (for
+example, after reindexing under a different junk-filtering regime). The index references file rows by SQLite rowid, which
+.B VACUUM
+can renumber \(em acceptable for artifacts rebuilt in one command.
+.PP
+The database must have been populated by
+.BR sumtag (1)
+first (e.g.
+.BR "sumtag \-\-database db.sqlite \-\-sum \-\-locate /data" );
+byte totals in the report additionally want the stat metadata a
+.B \-\-locate
+pass records.
+.SH SEE ALSO
+.BR sumtag (1)
+.SH AUTHOR
+The sumtag authors.

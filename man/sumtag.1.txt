@@ -309,6 +309,16 @@ EXAMPLES
 
        sumtag --sum --exclude '*.vob' --exclude VIDEO_TS /data
 
+       Watch a long run: an up-front counting walk drives per-file nnn/mmm
+       counters, and slow files get a live progress bar:
+
+       sumtag --sum --prescan --progress /data
+
+       Preview which files would lose their stamp, then really remove them:
+
+       sumtag --remove -n /scratch
+       sumtag --remove /scratch
+
 NOTES
        Timestamps are recorded in UTC with microsecond precision. Mtime
        comparisons truncate both the stored and live values to the same
@@ -320,4 +330,4 @@ SEE ALSO
 AUTHOR
        The sumtag authors.
 
-sumtag 0.1.0                       June 2026                         SUMTAG(1)
+sumtag 0.1.0                       July 2026                         SUMTAG(1)
