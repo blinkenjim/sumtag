@@ -14,7 +14,7 @@ Usage (pipeline order):
                                               #   index, then compare every
                                               #   directory to every other and
                                               #   store the pairs
-    grouper.py --database DB --index [--progress]          # stage 1 alone
+    grouper.py --database DB --index [--progress] [--no-junk]  # stage 1 alone
     grouper.py --database DB --pairs [--fn N] [--jobs N] [--progress]
                                      [--max-df N] [--min-sim X]  # stage 2 alone
     grouper.py --database DB --threshold 0.7  # stage 3: build + persist groups
@@ -43,8 +43,10 @@ Data model (grouper-owned derived tables inside the sumtag database):
 
     dirs / dir_files -- the directory index: every files.rel_path distilled to
         the distinct directories that directly contain at least one *visible*
-        stamped file (basename not starting with '.'); all-hidden directories
-        are junk, dropped at --index so nothing downstream ever sees them.
+        stamped file (basename not starting with '.') under a *visible* path
+        (no component starting with '.'). Junk -- .git/.build internals,
+        .Trash-* trees, all-hidden directories -- is dropped at --index so
+        nothing downstream ever sees it; --no-junk disables both filters.
         dir_files maps dir_id -> files.rowid (indexed) so a directory's
         contents are one keyed lookup. Comparisons are direct-children only,
         deliberately -- a directory's own file listing is its signature.
@@ -206,36 +208,42 @@ def _now_iso() -> str:
 
 def _set_meta(conn: sqlite3.Connection, artifact: str, fn: str,
               threshold: float | None, max_df: int | None = None,
-              min_sim: float | None = None) -> None:
-    """Record provenance for a built artifact ('pairs' or 'groups').
+              min_sim: float | None = None,
+              no_junk: bool | None = None) -> None:
+    """Record provenance for a built artifact ('index', 'pairs', 'groups').
 
     max_df is the candidate-nomination cap the pair table was built with
     (NULL = exhaustive all-pairs); min_sim is its storage floor (NULL = all
-    nonzero pairs kept). Older databases predate these columns, so they are
-    added in place when missing.
+    nonzero pairs kept); no_junk records whether the index was built with
+    junk filtering disabled (NULL for non-index artifacts, and for indexes
+    from before the column existed). Older databases predate these columns,
+    so they are added in place when missing.
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS grouper_meta (
           artifact  TEXT PRIMARY KEY,
-          fn        TEXT NOT NULL,
-          threshold REAL,              -- NULL for the pair table
+          fn        TEXT NOT NULL,     -- '' for the index (no fn involved)
+          threshold REAL,              -- NULL for the pair table and index
           built_at  TEXT NOT NULL,
           max_df    INTEGER,           -- nomination cap; NULL = exhaustive
-          min_sim   REAL               -- storage floor; NULL = keep nonzero
+          min_sim   REAL,              -- storage floor; NULL = keep nonzero
+          no_junk   INTEGER            -- index built with --no-junk (0/1)
         )""")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(grouper_meta)")}
-    for col, typ in (("max_df", "INTEGER"), ("min_sim", "REAL")):
+    for col, typ in (("max_df", "INTEGER"), ("min_sim", "REAL"),
+                     ("no_junk", "INTEGER")):
         if col not in cols:
             conn.execute(f"ALTER TABLE grouper_meta ADD COLUMN {col} {typ}")
     conn.execute("""
         INSERT INTO grouper_meta(artifact, fn, threshold, built_at,
-                                 max_df, min_sim)
-        VALUES (?, ?, ?, ?, ?, ?)
+                                 max_df, min_sim, no_junk)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(artifact) DO UPDATE SET
             fn=excluded.fn, threshold=excluded.threshold,
             built_at=excluded.built_at, max_df=excluded.max_df,
-            min_sim=excluded.min_sim
-        """, (artifact, fn, threshold, _now_iso(), max_df, min_sim))
+            min_sim=excluded.min_sim, no_junk=excluded.no_junk
+        """, (artifact, fn, threshold, _now_iso(), max_df, min_sim,
+              None if no_junk is None else int(no_junk)))
 
 
 def _get_meta(conn: sqlite3.Connection, artifact: str):
@@ -382,33 +390,57 @@ CREATE INDEX idx_dir_files_dir ON dir_files(dir_id);
 """
 
 
-def build_dir_index(conn: sqlite3.Connection, progress: bool = False) -> None:
+def build_dir_index(conn: sqlite3.Connection, progress: bool = False,
+                    no_junk: bool = False) -> None:
     """(Re)build dirs/dir_files from the files table (a full drop-and-rebuild).
 
-    Junk filter: a directory whose direct stamped files are all hidden
-    (every basename starts with '.') is dropped from the index entirely --
-    it never reaches --pairs or the grouping. Directories with at least one
-    visible file are kept whole, hidden files included: the filter decides
-    which directories exist, not which files count in their signatures.
+    Junk filters (both disabled by no_junk, i.e. --no-junk):
+
+    - hidden path component: a directory whose mount-relative path has any
+      component starting with '.' (.git/hooks, .build/checkouts/x, files
+      under .Trash-*) is machinery, not content -- never indexed at all.
+    - all-hidden files: a directory whose direct stamped files are all
+      hidden (every basename starts with '.') is dropped from the index.
+
+    Either way a dropped directory never reaches --pairs or the grouping.
+    Directories with at least one visible file under a visible path are
+    kept whole, hidden files included: the filters decide which directories
+    exist, not which files count in their signatures. The regime is
+    recorded in grouper_meta ('index' row, no_junk column) -- tombstoned
+    before table surgery and rewritten on success, the same idiom as
+    --pairs, so a partial index can't wear valid provenance.
     """
     if not _table_exists(conn, "files"):
         raise LookupError("not a sumtag database (no files table)")
+    if _table_exists(conn, "grouper_meta"):
+        conn.execute("DELETE FROM grouper_meta WHERE artifact='index'")
+        conn.commit()                    # tombstone survives an interrupt
     conn.executescript(DIR_INDEX_SQL)
-    dir_ids: dict[tuple[int, str], int] = {}
+    # dir_ids: key -> rowid for kept dirs, None for junk-path dirs
+    dir_ids: dict[tuple[int, str], int | None] = {}
     visible: set[int] = set()            # dir ids with >= 1 non-dot file
     files = conn.execute(
         "SELECT rowid, mountpoint_id, rel_path FROM files").fetchall()
     bar = Progress(len(files), "files", progress)
+    junk_paths = 0
     try:
         for f in files:
-            key = (f["mountpoint_id"], os.path.dirname(f["rel_path"]))
-            dir_id = dir_ids.get(key)
+            rel_dir = os.path.dirname(f["rel_path"])
+            key = (f["mountpoint_id"], rel_dir)
+            if key not in dir_ids:
+                if not no_junk and any(
+                        part.startswith(".") for part in rel_dir.split("/")):
+                    dir_ids[key] = None
+                    junk_paths += 1
+                else:
+                    cur = conn.execute(
+                        "INSERT INTO dirs(mountpoint_id, rel_path)"
+                        " VALUES (?, ?)", key)
+                    dir_ids[key] = cur.lastrowid
+            dir_id = dir_ids[key]
             if dir_id is None:
-                cur = conn.execute(
-                    "INSERT INTO dirs(mountpoint_id, rel_path) VALUES (?, ?)",
-                    key)
-                dir_id = cur.lastrowid
-                dir_ids[key] = dir_id
+                bar.add(1)
+                continue
             if not os.path.basename(f["rel_path"]).startswith("."):
                 visible.add(dir_id)
             conn.execute(
@@ -417,12 +449,18 @@ def build_dir_index(conn: sqlite3.Connection, progress: bool = False) -> None:
             bar.add(1)
     finally:
         bar.finish()
-    hidden = [(d,) for d in dir_ids.values() if d not in visible]
-    if hidden:
-        conn.executemany("DELETE FROM dir_files WHERE dir_id = ?", hidden)
-        conn.executemany("DELETE FROM dirs WHERE id = ?", hidden)
-        print(f"grouper: dropped {len(hidden)} directorie(s) with no "
-              "visible files", file=sys.stderr)
+    if junk_paths:
+        print(f"grouper: dropped {junk_paths} junk directorie(s) "
+              "(hidden path component)", file=sys.stderr)
+    if not no_junk:
+        hidden = [(d,) for d in dir_ids.values()
+                  if d is not None and d not in visible]
+        if hidden:
+            conn.executemany("DELETE FROM dir_files WHERE dir_id = ?", hidden)
+            conn.executemany("DELETE FROM dirs WHERE id = ?", hidden)
+            print(f"grouper: dropped {len(hidden)} directorie(s) with no "
+                  "visible files", file=sys.stderr)
+    _set_meta(conn, "index", fn="", threshold=None, no_junk=no_junk)
     conn.commit()
 
 
@@ -1138,6 +1176,11 @@ def report_groups(conn: sqlite3.Connection, sort: str = "bond") -> int:
     if pmeta is not None and pmeta["built_at"] > gmeta["built_at"]:
         print("note: pair table is newer than this grouping; "
               "rerun --threshold to refresh")
+    imeta = _get_meta(conn, "index")
+    if imeta is not None and pmeta is not None \
+            and imeta["built_at"] > pmeta["built_at"]:
+        print("note: directory index is newer than the pair table; "
+              "rerun --pairs (then --threshold) to rebuild on it")
 
     # Highest stored similarity between any two members of each group -- the
     # bond that says how alike the group is at its closest point.
@@ -1329,6 +1372,11 @@ def main(argv: list[str] | None = None) -> int:
                              "(0.0-1.0); a later --threshold below X is "
                              "refused. Default 0.0: keep every nonzero "
                              "pair")
+    parser.add_argument("--no-junk", action="store_true",
+                        help="disable --index's junk filtering: keep "
+                             "directories under hidden path components "
+                             "(.git, .Trash-*, ...) and directories whose "
+                             "files are all hidden")
     parser.add_argument("--sort", choices=("bond", "files", "size",
                                            "tree-size"),
                         default="bond",
@@ -1377,7 +1425,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         try:
             if args.index:
-                build_dir_index(conn, progress=args.progress)
+                build_dir_index(conn, progress=args.progress,
+                                no_junk=args.no_junk)
             if args.pairs:
                 build_pairs(conn, args.database, args.fn or DEFAULT_FN,
                             jobs=args.jobs, progress=args.progress,
