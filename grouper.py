@@ -24,7 +24,9 @@ Usage (pipeline order):
     grouper.py --database DB [--sort K]       # THE report: show stored grouping
                                               #   ordered by K: bond (default,
                                               #   strongest bonds first), files,
-                                              #   or size (largest group first)
+                                              #   size, or tree-size (largest
+                                              #   group first; tree-size rolls
+                                              #   up whole subtrees)
 
     grouper.py --database DB --ls DIR             # inspect one directory
     grouper.py --database DB --compare A B [--fn N]  # similarity of two dirs
@@ -1022,13 +1024,75 @@ def grouping_current(conn: sqlite3.Connection, threshold: float,
     return True
 
 
+def _tree_stats(conn: sqlite3.Connection) -> dict[int, dict[str, int]]:
+    """Recursive group weights for --sort tree-size: each group's totals
+    cover its member directories' *entire subtrees*, not just the direct
+    children the index (and the similarity scores) are scoped to.
+
+    A member nested under another member of the same group is skipped, so
+    nothing double-counts within a group. Subtree files come from an indexed
+    range scan on files(mountpoint_id, rel_path): every path under dir/
+    sorts between 'dir/' and 'dir0' ('0' is the character after '/'), so the
+    scan rides the UNIQUE(mountpoint_id, rel_path) index. Deliberately
+    subtree-on-disk semantics: this counts every stamped file under the
+    member, including files the directory index never saw (hidden files,
+    everything under dropped all-hidden junk directories).
+    """
+    by_group: dict[int, dict[int, set[str]]] = {}
+    for r in conn.execute(
+            """
+            SELECT gd.group_id, d.mountpoint_id, d.rel_path
+              FROM group_dirs gd
+              JOIN dirs d ON d.id = gd.dir_id
+            """):
+        by_group.setdefault(r["group_id"], {}).setdefault(
+            r["mountpoint_id"], set()).add(r["rel_path"])
+
+    def covered(rel: str, peers: set[str]) -> bool:
+        while rel:                       # walk up the parent chain
+            rel = rel[:rel.rfind("/")] if "/" in rel else ""
+            if rel in peers:
+                return True
+        return False
+
+    stats: dict[int, dict[str, int]] = {}
+    for gid, mounts in by_group.items():
+        tot = {"n_files": 0, "total_size": 0, "unsized": 0}
+        for mp_id, rels in mounts.items():
+            for rel in rels:
+                if covered(rel, rels):
+                    continue
+                if rel:
+                    row = conn.execute(
+                        "SELECT COUNT(*) AS n,"
+                        " COALESCE(SUM(size), 0) AS sz,"
+                        " COALESCE(SUM(size IS NULL), 0) AS un"
+                        " FROM files WHERE mountpoint_id = ?"
+                        " AND rel_path >= ? AND rel_path < ?",
+                        (mp_id, rel + "/", rel + "0")).fetchone()
+                else:                    # mount root: the whole mountpoint
+                    row = conn.execute(
+                        "SELECT COUNT(*) AS n,"
+                        " COALESCE(SUM(size), 0) AS sz,"
+                        " COALESCE(SUM(size IS NULL), 0) AS un"
+                        " FROM files WHERE mountpoint_id = ?",
+                        (mp_id,)).fetchone()
+                tot["n_files"] += row["n"]
+                tot["total_size"] += row["sz"]
+                tot["unsized"] += row["un"]
+        stats[gid] = tot
+    return stats
+
+
 def report_groups(conn: sqlite3.Connection, sort: str = "bond") -> int:
     """The one reporter: print the stored grouping with its provenance.
 
     sort chooses the group order: "bond" (default) is creation order --
     strongest bonds first, the order the grouping walk minted group ids;
     "files" and "size" order by each group's total stamped-file count or
-    byte size (descending), aggregated over its member directories.
+    byte size (descending), aggregated over its member directories' direct
+    children; "tree-size" is size over each member's entire subtree instead
+    (see _tree_stats for the semantics shift that implies).
     """
     gmeta = _get_meta(conn, "groups")
     if gmeta is None or not _table_exists(conn, "group_dirs"):
@@ -1037,10 +1101,11 @@ def report_groups(conn: sqlite3.Connection, sort: str = "bond") -> int:
         return 1
 
     # Group weight for the stat sorts: total stamped files and bytes across
-    # each group's member directories (direct children, same as the index).
-    # Sizes come from the nullable, --locate-populated files.size column --
-    # checked before any report line prints, so a refusal is a clean refusal.
-    stats: dict[int, sqlite3.Row] = {}
+    # each group's member directories (direct children, same as the index --
+    # or whole subtrees for tree-size). Sizes come from the nullable,
+    # --locate-populated files.size column -- checked before any report line
+    # prints, so a refusal is a clean refusal.
+    stats: dict[int, dict[str, int] | sqlite3.Row] = {}
     if sort in ("files", "size"):
         stats = {r["group_id"]: r for r in conn.execute(
             """
@@ -1053,8 +1118,11 @@ def report_groups(conn: sqlite3.Connection, sort: str = "bond") -> int:
               JOIN files f ON f.rowid = df.file_id
           GROUP BY gd.group_id
             """)}
+    elif sort == "tree-size":
+        stats = _tree_stats(conn)
+    if sort in ("size", "tree-size"):
         unsized = sum(r["unsized"] for r in stats.values())
-        if sort == "size" and unsized:
+        if unsized:
             n_total = sum(r["n_files"] for r in stats.values())
             if unsized == n_total:
                 print("grouper: no stored file sizes to sort by; run "
@@ -1104,17 +1172,18 @@ def report_groups(conn: sqlite3.Connection, sort: str = "bond") -> int:
 
     if sort == "files":
         order = sorted(by_gid, key=lambda g: (-_stat(g, "n_files"), g))
-    elif sort == "size":
+    elif sort in ("size", "tree-size"):
         order = sorted(by_gid, key=lambda g: (-_stat(g, "total_size"), g))
     else:
         order = sorted(by_gid)           # creation order: strongest bonds first
 
+    tree = " in tree" if sort == "tree-size" else ""
     for gid in order:
         members = by_gid[gid]
         weight = ""
         if gid in stats:
             weight = (f", {stats[gid]['n_files']} files"
-                      f", {_human_size(stats[gid]['total_size'])}")
+                      f", {_human_size(stats[gid]['total_size'])}{tree}")
         top = f", best pair {best[gid]:.3f}" if gid in best else ""
         print(f"\ngroup {gid}  ({len(members)} directories{weight}{top})")
         for path in members:
@@ -1260,13 +1329,16 @@ def main(argv: list[str] | None = None) -> int:
                              "(0.0-1.0); a later --threshold below X is "
                              "refused. Default 0.0: keep every nonzero "
                              "pair")
-    parser.add_argument("--sort", choices=("bond", "files", "size"),
+    parser.add_argument("--sort", choices=("bond", "files", "size",
+                                           "tree-size"),
                         default="bond",
                         help="group order for the report: bond (default) = "
                              "strongest-bonds-first creation order; files / "
                              "size = total stamped-file count / byte size of "
                              "each group's directories, largest first (size "
-                             "needs a sumtag --locate run to fill files.size)")
+                             "needs a sumtag --locate run to fill files.size); "
+                             "tree-size = like size but over each member's "
+                             "entire subtree, nested members deduplicated")
     parser.add_argument("--ls", metavar="DIR",
                         help="list the files in DIR (absolute or "
                              "mount-relative) using the directory index")
