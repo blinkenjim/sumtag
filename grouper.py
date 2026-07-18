@@ -14,7 +14,7 @@ Usage (pipeline order):
                                               #   index, then compare every
                                               #   directory to every other and
                                               #   store the pairs
-    grouper.py --database DB --index [--progress] [--no-junk]  # stage 1 alone
+    grouper.py --database DB --index [--progress] [--no-junk-filter]  # stage 1 alone
     grouper.py --database DB --pairs [--fn N] [--jobs N] [--progress]
                                      [--max-df N] [--min-sim X]  # stage 2 alone
     grouper.py --database DB --threshold 0.7  # stage 3: build + persist groups
@@ -46,7 +46,7 @@ Data model (grouper-owned derived tables inside the sumtag database):
         stamped file (basename not starting with '.') under a *visible* path
         (no component starting with '.'). Junk -- .git/.build internals,
         .Trash-* trees, all-hidden directories -- is dropped at --index so
-        nothing downstream ever sees it; --no-junk disables both filters.
+        nothing downstream ever sees it; --no-junk-filter disables both filters.
         dir_files maps dir_id -> files.rowid (indexed) so a directory's
         contents are one keyed lookup. Comparisons are direct-children only,
         deliberately -- a directory's own file listing is its signature.
@@ -227,7 +227,7 @@ def _set_meta(conn: sqlite3.Connection, artifact: str, fn: str,
           built_at  TEXT NOT NULL,
           max_df    INTEGER,           -- nomination cap; NULL = exhaustive
           min_sim   REAL,              -- storage floor; NULL = keep nonzero
-          no_junk   INTEGER            -- index built with --no-junk (0/1)
+          no_junk   INTEGER            -- index built with --no-junk-filter (0/1)
         )""")
     cols = {r[1] for r in conn.execute("PRAGMA table_info(grouper_meta)")}
     for col, typ in (("max_df", "INTEGER"), ("min_sim", "REAL"),
@@ -394,7 +394,7 @@ def build_dir_index(conn: sqlite3.Connection, progress: bool = False,
                     no_junk: bool = False) -> None:
     """(Re)build dirs/dir_files from the files table (a full drop-and-rebuild).
 
-    Junk filters (both disabled by no_junk, i.e. --no-junk):
+    Junk filters (both disabled by no_junk, i.e. --no-junk-filter):
 
     - hidden path component: a directory whose mount-relative path has any
       component starting with '.' (.git/hooks, .build/checkouts/x, files
@@ -1372,7 +1372,8 @@ def main(argv: list[str] | None = None) -> int:
                              "(0.0-1.0); a later --threshold below X is "
                              "refused. Default 0.0: keep every nonzero "
                              "pair")
-    parser.add_argument("--no-junk", action="store_true",
+    parser.add_argument("--no-junk-filter", dest="no_junk",
+                        action="store_true",
                         help="disable --index's junk filtering: keep "
                              "directories under hidden path components "
                              "(.git, .Trash-*, ...) and directories whose "

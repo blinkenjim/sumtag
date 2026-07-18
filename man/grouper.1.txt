@@ -31,7 +31,7 @@ DESCRIPTION
               a hidden (dot-prefixed) component -- .git/hooks,
               .build/checkouts, anything under .Trash-* -- is never indexed at
               all, and a directory whose direct files are all hidden is
-              dropped.  --no-junk disables both.
+              dropped.  --no-junk-filter disables both.
 
        --pairs
               Stage 2: compare every directory to every other with the
@@ -64,7 +64,7 @@ OPTIONS
        --index
               Stage 1 alone: (re)build the directory index. Silent on success.
 
-       --no-junk
+       --no-junk-filter
               Disable --index's junk filtering for the run: directories under
               hidden path components and all-hidden directories are indexed
               like any other. The escape hatch for deliberately grouping
@@ -231,7 +231,7 @@ EXAMPLES
        Rebuild everything with junk filtering off, to ask whether hidden trees
        (here, trash contents) are duplicated elsewhere:
 
-       grouper.py --database db.sqlite --no-junk --prep --threshold 0.9
+       grouper.py --database db.sqlite --no-junk-filter --prep --threshold 0.9
 
 EXIT STATUS
        0 on success; 1 if an error prevented the request from being answered

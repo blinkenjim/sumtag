@@ -37,7 +37,7 @@ anything under
 .B .Trash\-*
 \(em is never indexed at all, and a directory whose direct files are all
 hidden is dropped.
-.B \-\-no\-junk
+.B \-\-no\-junk\-filter
 disables both.
 .TP
 .B \-\-pairs
@@ -78,7 +78,7 @@ then
 .B \-\-index
 Stage 1 alone: (re)build the directory index. Silent on success.
 .TP
-.B \-\-no\-junk
+.B \-\-no\-junk\-filter
 Disable
 .BR \-\-index 's
 junk filtering for the run: directories under hidden path components and
@@ -299,7 +299,7 @@ Rebuild everything with junk filtering off, to ask whether hidden trees
 (here, trash contents) are duplicated elsewhere:
 .PP
 .EX
-grouper.py \-\-database db.sqlite \-\-no\-junk \-\-prep \-\-threshold 0.9
+grouper.py \-\-database db.sqlite \-\-no\-junk\-filter \-\-prep \-\-threshold 0.9
 .EE
 .SH EXIT STATUS
 .B 0
