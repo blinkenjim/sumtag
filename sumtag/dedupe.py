@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""dedupe.py -- delete files from a cull tree that duplicate an actual tree.
+"""dedupe -- delete files from a cull tree that duplicate an actual tree.
 
 The most dangerous companion program: it deletes files. Given a sumtag
 database and two directories known in it -- ACTUAL (the copy being kept,
@@ -124,9 +124,9 @@ directory, so the database matches what actually happened) and exits 130,
 sumtag's convention.
 
 Usage:
-    dedupe.py --database DB ACTUAL CULL              # preview (default)
-    dedupe.py --database DB ACTUAL CULL --delete     # actually delete
-    dedupe.py --database DB ACTUAL CULL --allow-mixed ...
+    dedupe --database DB ACTUAL CULL              # preview (default)
+    dedupe --database DB ACTUAL CULL --delete     # actually delete
+    dedupe --database DB ACTUAL CULL --allow-mixed ...
 """
 
 from __future__ import annotations
@@ -556,7 +556,7 @@ def _safety_checks(args) -> tuple[Db, Side, Side] | str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="dedupe.py",
+        prog="dedupe",
         description="Delete files in CULL whose digests duplicate files in "
                     "the corresponding directory of ACTUAL (walked in sync). "
                     "A bare run only previews; --delete arms it.")

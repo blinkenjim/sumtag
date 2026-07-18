@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""grouper.py -- find groups of similar directories in a sumtag database.
+"""grouper -- find groups of similar directories in a sumtag database.
 
 Sumtag stamps files with a checksum and mirrors that metadata into an optional
 SQLite database (see CLAUDE.md "Database storage"). Grouper is the "intent #2"
@@ -9,31 +9,31 @@ versions of the same project from slightly different times. Grouping is the
 default act; everything else is a preparation stage or an inspection helper.
 
 Usage (pipeline order):
-    grouper.py --database DB --prep [--fn N] [--jobs N] [--progress]
-                                              # stages 1+2: build the directory
-                                              #   index, then compare every
-                                              #   directory to every other and
-                                              #   store the pairs
-    grouper.py --database DB --index [--progress]          # stage 1 alone
-    grouper.py --database DB --pairs [--fn N] [--jobs N] [--progress]
-                                     [--max-df N] [--min-sim X] [--name]
-                                                  # stage 2 alone
-    grouper.py --database DB --threshold 0.7  # stage 3: build + persist groups
-                                              #   (skipped if the stored grouping
-                                              #   is already current), then
-                                              #   report them
-    grouper.py --database DB                  # THE report: show stored grouping
+    grouper --database DB --prep [--fn N] [--jobs N] [--progress]
+                                           # stages 1+2: build the directory
+                                           #   index, then compare every
+                                           #   directory to every other and
+                                           #   store the pairs
+    grouper --database DB --index [--progress]          # stage 1 alone
+    grouper --database DB --pairs [--fn N] [--jobs N] [--progress]
+                                  [--max-df N] [--min-sim X] [--name]
+                                               # stage 2 alone
+    grouper --database DB --threshold 0.7  # stage 3: build + persist groups
+                                           #   (skipped if the stored grouping
+                                           #   is already current), then
+                                           #   report them
+    grouper --database DB                  # THE report: show stored grouping
 
-    grouper.py --database DB --ls DIR             # inspect one directory
-    grouper.py --database DB --compare A B [--fn N] [--name]
-                                                  # similarity of two dirs
-    grouper.py --database DB --dups [--min N]     # duplicate *files* report
-    grouper.py --database DB --top [N]            # the N (default 1) most
-                                                  #   frequent checksums,
-                                                  #   excluding empty files
-    grouper.py --database DB --clean-db           # drop every grouper-owned
-                                                  #   derived table and VACUUM,
-                                                  #   returning the space
+    grouper --database DB --ls DIR             # inspect one directory
+    grouper --database DB --compare A B [--fn N] [--name]
+                                               # similarity of two dirs
+    grouper --database DB --dups [--min N]     # duplicate *files* report
+    grouper --database DB --top [N]            # the N (default 1) most
+                                               #   frequent checksums,
+                                               #   excluding empty files
+    grouper --database DB --clean-db           # drop every grouper-owned
+                                               #   derived table and VACUUM,
+                                               #   returning the space
 
 Stages may be combined in one invocation (--prep --threshold 0.7). --index and
 --pairs are silent on success; --threshold ends with the stored-grouping
@@ -1255,7 +1255,7 @@ def report_dups(conn: sqlite3.Connection, min_count: int,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="grouper.py",
+        prog="grouper",
         description="Find groups of directories with identical or similar "
                     "contents in a sumtag database. With no action flags, "
                     "reports the stored grouping.",

@@ -1,0 +1,193 @@
+.TH DEDUPE 1 "July 2026" "sumtag 0.1.0" "User Commands"
+.SH NAME
+dedupe \- delete files from a cull tree that duplicate an actual tree
+.SH SYNOPSIS
+.B dedupe
+.BI \-\-database " DB"
+.RB [ \-\-delete ]
+.RB [ \-\-allow\-mixed ]
+.I ACTUAL CULL
+.SH DESCRIPTION
+.B dedupe
+dismantles a redundant copy of a directory tree.
+.I ACTUAL
+is the copy being kept \(em it is never modified, ever.
+.I CULL
+is the redundant copy: every file in it whose digest duplicates a file in
+the
+.I corresponding
+directory of
+.I ACTUAL
+is deleted, regardless of name, and directories emptied by this are removed
+on the way back up. If cull holds three files matching one actual-side
+witness, all three are deleted. What survives in cull is therefore always a
+signpost \(em something unique, unknown, or suspicious \(em and the cull
+root itself always survives, even empty, as a placeholder and a receipt.
+.PP
+.B dedupe
+deletes files. It is an experimental companion to
+.BR sumtag (1)
+and works from a sumtag SQLite database that already knows both trees; it
+never computes a checksum. A bare run is a full preview
+.RB ( "would delete" ", " "would sweep" ", " "would rmdir" ,
+with the database opened read-only); actual deletion requires the explicit
+.B \-\-delete
+option.
+.SH THE SYNCHRONIZED WALK
+Both trees are walked depth-first at the same time, locked in step by
+relative path: while visiting
+.IB ACTUAL /foo/bar
+the walk is in
+.IB CULL /foo/bar\c
+\&, and it never descends into a subdirectory name that does not exist as a
+real directory on both sides. Comparison and deletion are therefore flat,
+one directory pair at a time: a cull file dies exactly when a same-digest
+file sits in the corresponding actual directory \(em same name not
+required, same relative directory required. Reorganised duplicates are out
+of scope by design, in exchange for a comparison that can be verified by
+looking at one directory pair at a time.
+.PP
+The one exception is the empty-directory carve-out: a cull-side
+subdirectory with no real files anywhere beneath it (only ignorable junk
+files such as
+.BR .DS_Store ,
+qualifying symbolic links, and empty directories) is swept even without an
+actual-side counterpart \(em deleting it destroys nothing.
+.SH WHAT IS DELETED, AND WHAT NEVER IS
+Only plain files positively identified as duplicates are deleted, plus the
+exit junk below, and only ever on the cull side.
+.IP \(bu 3
+Files the database does not know (never stamped or mirrored) are invisible:
+never matched, never deleted, left in place even if that leaves their
+directory standing.
+.IP \(bu 3
+Ignorable junk files
+.RB ( .DS_Store )
+never block a directory's removal, and are swept exactly when they are the
+last thing standing before the directory is removed \(em never earlier.
+.IP \(bu 3
+Symbolic links are never followed and never digest-matched. A link is swept
+at directory exit only if it is relative and points inside the cull tree
+\(em where it points is what matters, not whether the target still exists,
+since the deletion phase has usually just emptied it. An absolute link is
+never deleted, wherever it points, and neither is any link escaping the
+cull tree: such a link blocks its directory like any other survivor.
+.IP \(bu 3
+A cull directory containing an
+.B @sumtag\-ignore
+marker (see
+.BR sumtag (1))
+is fenced off: not descended, nothing inside it deleted, swept, or removed;
+it blocks its parent like any survivor. A marker on the cull root itself is
+honoured with a warning, and the run does nothing.
+.SH TRUST MODEL
+Stored digests are trusted; neither side is re-hashed. That is defensible
+because deleting a true duplicate is reversible \(em the actual tree keeps
+the bytes \(em but it only holds if the stored digests describe the current
+bytes, so three vetoes gate every candidate, none of which read file
+contents:
+.IP \(bu 3
+the database digest must equal the digest in the file's own extended
+attribute, on both sides;
+.IP \(bu 3
+the file's live mtime must equal the mtime recorded in its extended
+attribute, on both sides;
+.IP \(bu 3
+the cull file's live size must equal its witness's. XXH3-64 is a 64-bit
+non-cryptographic hash, and the size check is free collision insurance: a
+digest match with differing sizes is reported loudly as a mismatch, the
+file is kept, and the run exits 2.
+.PP
+A cull-side file failing a veto is kept, with a warning; an actual-side
+file failing a veto simply witnesses nothing.
+.SH SAFETY CHECKS
+All of the following are verified before anything is at risk:
+.IP \(bu 3
+Both roots must exist and be disjoint under
+.BR realpath (3)
+\(em not equal, and neither nested inside the other, so symbolic links
+cannot disguise an overlap.
+.IP \(bu 3
+The database must already exist and must know both roots: each root's live
+mount point must be recorded and file rows must be present beneath it. An
+unmounted drive is an error, never a silent no-match.
+.IP \(bu 3
+If the two roots' rows carry more than one digest algorithm, the run is
+refused unless
+.B \-\-allow\-mixed
+is given, because cross-algorithm duplicates would silently survive.
+.IP \(bu 3
+At the moment of deletion, if the cull file and its witness resolve to the
+same path under
+.BR realpath (3),
+they are one directory entry reached through links; the deletion is refused
+loudly (exit status 2), since deleting \(lqthe copy\(rq would delete the
+only name. The same inode behind different real paths is a genuine hard
+link \(em safe to delete, and noted.
+.PP
+Pass the roots spelled as sumtag scanned them: row lookups use the absolute
+path as given, exactly as sumtag records paths, so a differently-spelled
+root (for example through a symlinked path component) fails the
+must-know-both-roots check with a clear error rather than matching nothing.
+.SH OPTIONS
+.TP
+.BI \-\-database " DB"
+Path to the sumtag SQLite database that knows both trees. Required.
+.TP
+.B \-\-delete
+Actually delete. Without it, the run is a complete preview and the database
+is opened read-only. Deleted files' database rows are removed in the same
+run, committed per directory, so an interrupted run stays consistent.
+.TP
+.B \-\-allow\-mixed
+Proceed even when the roots carry more than one digest algorithm.
+Cross-algorithm duplicates silently survive; see
+.B SAFETY CHECKS
+above.
+.SH RUN SUMMARY
+Every run ends with a summary block: files deleted (or would-delete) and
+their cumulative size, items swept, directories removed, files kept (broken
+down as unique, unknown, or stale), directories fenced by
+.B @sumtag\-ignore
+markers, errors, and the database and roots in use. Interrupting a run with
+Ctrl-C prints the same summary, prefixed by an
+.B interrupted
+line; the counters cover only completed work, and commits are per
+directory, so the database matches what actually happened.
+.SH EXIT STATUS
+.TP
+.B 0
+nothing redundant was found.
+.TP
+.B 1
+duplicates were found (deleted, or would-delete under preview).
+.TP
+.B 2
+errors or a safety refusal prevented a complete, clean run.
+.TP
+.B 130
+the run was interrupted by Ctrl-C (128 + SIGINT, the shell convention).
+.SH EXAMPLES
+Preview what dismantling a redundant backup copy would delete:
+.PP
+.EX
+dedupe \-\-database /var/lib/sumtag.sqlite /data/proj /backup/proj\-old
+.EE
+.PP
+Actually delete:
+.PP
+.EX
+dedupe \-\-database /var/lib/sumtag.sqlite \-\-delete /data/proj /backup/proj\-old
+.EE
+.SH NOTES
+.B dedupe
+is experimental \(em and it is the dangerous companion: always preview
+first. Both trees should be freshly stamped
+.RB ( "sumtag \-\-sum \-\-database"
+\&...) before a run, so the trust-model vetoes have current metadata to
+check against; stale stamps cause files to be kept, never wrongly deleted.
+.SH SEE ALSO
+.BR sumtag (1),
+.BR grouper (1)
+.SH AUTHOR
+The sumtag authors.

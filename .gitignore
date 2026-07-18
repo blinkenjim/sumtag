@@ -18,7 +18,7 @@ env/
 # Emacs backup files
 *~
 
-# Scratch sumtag databases from experimentation (grouper.py, manual runs)
+# Scratch sumtag databases from experimentation (grouper, manual runs)
 *.sqlite
 
 # Local Claude Code config (machine-specific)

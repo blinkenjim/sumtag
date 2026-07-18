@@ -1,0 +1,278 @@
+.TH GROUPER 1 "July 2026" "sumtag 0.1.0" "User Commands"
+.SH NAME
+grouper \- find groups of identical or similar directories in a sumtag database
+.SH SYNOPSIS
+.B grouper
+.BI \-\-database " DB"
+.RI [ ACTIONS ]
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+.B grouper
+finds groups of directories whose contents are identical or nearly so \(em
+for example, two slightly different versions of the same project saved at
+slightly different times. It is an experimental companion to
+.BR sumtag (1):
+it works entirely from a sumtag SQLite database (see the
+.B \-\-database
+option of
+.BR sumtag (1)),
+never reading file contents or extended attributes and never computing a
+checksum itself. The database must have been populated by sumtag first.
+.PP
+Alongside sumtag's own tables, grouper owns a set of derived tables inside
+the same database file
+.RB ( dirs ", " dir_files ", " dir_pairs ", " groups ", " group_dirs ", "
+.BR grouper_meta ).
+All of them are rebuildable from sumtag's tables, and all can be dropped
+with
+.BR \-\-clean\-db .
+.PP
+The work is a pipeline of three explicit stages, each persisted so later
+stages are cheap to re-run:
+.IP 1. 3
+.B \-\-index
+distills the file rows into the distinct directories that directly contain
+at least one stamped file. Only direct children count \(em a directory's own
+file listing is its signature.
+.IP 2. 3
+.B \-\-pairs
+compares every directory to every other with one named comparison function
+(see
+.B COMPARISON FUNCTIONS
+below) and stores every nonzero similarity. This is the expensive stage, so
+the similarity threshold is deliberately not applied here: regrouping at a
+different threshold recomputes nothing.
+.IP 3. 3
+.B \-\-threshold
+walks the stored pairs best-first and partitions the directories into
+groups \(em one placement decision per directory, and groups are never
+merged. At equal similarity, the pair sharing more files ranks first, so
+large overlaps seed groups ahead of trivial ones. The result is persisted
+and reported.
+.PP
+.B \-\-prep
+runs stages 1 and 2 together. A bare
+.B grouper \-\-database
+.I DB
+with no action reports the stored grouping again. Stages may be combined in
+one invocation
+.RB ( \-\-prep " " \-\-threshold " 0.7)."
+.SH OPTIONS
+.TP
+.BI \-\-database " DB"
+Path to the sumtag SQLite database. Required on every invocation.
+.TP
+.B \-\-prep
+Stages 1+2:
+.B \-\-index
+then
+.B \-\-pairs
+in one shot.
+.TP
+.B \-\-index
+Stage 1: (re)build the directory index. Silent on success.
+.TP
+.B \-\-pairs
+Stage 2: compare every directory to every other and store all nonzero
+similarities. Silent on success. Scoring fans out across
+.B \-\-jobs
+worker processes; every database write stays in the parent. The stored pair
+set is identical at any
+.B \-\-jobs
+value.
+.TP
+.BI \-\-threshold " X"
+Stage 3: build and persist the grouping from the stored pairs, using
+.I X
+(0.0\-1.0) as the similar-enough bar, then report it. Skipped when the
+stored grouping is already current for this threshold and comparison
+function \(em in that case it just reports. A threshold below a stored
+.B \-\-min\-sim
+floor is refused with a hint to re-run
+.BR \-\-pairs ,
+never answered silently from an incomplete pair table.
+.TP
+.BI \-\-fn " FN"
+Comparison function for
+.BR \-\-pairs / \-\-compare
+(see
+.B COMPARISON FUNCTIONS
+below). Default:
+.BR name\-score .
+.TP
+.BI \-\-jobs " N"
+Worker processes for
+.B \-\-pairs
+scoring (default: all CPUs); 1 disables multiprocessing. Each worker loads
+its own signature table from the database, so every worker holds a full
+copy in memory \(em on a large corpus this option is a memory knob as much
+as a speed knob. Small corpora run serially regardless.
+.TP
+.BI \-\-max\-df " N"
+For
+.BR \-\-pairs :
+instead of exhaustive all-pairs comparison, score only candidate pairs that
+share at least one signature token (a basename or digest, depending on the
+comparison function) present in at most
+.I N
+directories. Candidates get exact scores from full signatures \(em the cap
+governs who gets looked at, never what a look sees; what is given up is
+only pairs whose sole overlap is ubiquitous tokens, whose similarity is
+necessarily tiny. By default, comparison is exhaustive up to roughly ten
+thousand directories, beyond which candidate mode engages with
+.IR N =1000;
+0 forces exhaustive at any size. Candidate mode is announced on standard
+error and the cap is recorded in the database.
+.TP
+.BI \-\-min\-sim " X"
+For
+.BR \-\-pairs :
+keep only pairs scoring at least
+.I X
+(0.0\-1.0). By default every nonzero pair is stored so that
+.B \-\-threshold
+stays a free exploratory knob, but at archive scale the weak tail dwarfs
+everything interesting. The floor governs what is kept, never what is
+looked at; scores are still computed exactly. A later
+.B \-\-threshold
+below the floor is refused (see above).
+.TP
+.B \-\-name
+For
+.BR \-\-pairs / \-\-compare :
+two directories whose basenames differ score 0, unconditionally \(em only
+same-named directories can pair, and therefore group. The typical prey is
+versioned copies of one tree
+.RB ( proj /,
+.BR backup/proj /,
+.BR old/proj /),
+where the directory's own name survives a copy even as contents drift. Also
+sharply reduces what
+.B \-\-pairs
+stores.
+.TP
+.B \-\-progress
+Live progress bar on standard error for the build stages
+.RB ( \-\-index / \-\-pairs ),
+following
+.BR sumtag (1)'s
+.B \-\-progress
+conventions: appears once a stage has run two seconds, redrawn in place,
+cleared on completion, suppressed when standard error is not a terminal.
+Shows done/total with rate, percent, elapsed time, and an ETA.
+.TP
+.BI \-\-ls " DIR"
+List the files in
+.I DIR
+(absolute or mount-relative) using the directory index.
+.TP
+.BI \-\-compare " DIR_A DIR_B"
+Print the similarity (0.0\-1.0) of two directories' contents.
+.TP
+.B \-\-dups
+Report duplicate files (same digest).
+.TP
+\fB\-\-top\fR [\fIN\fR]
+Report the
+.I N
+(default 1) most frequently occurring checksums and their files, excluding
+empty files. Mutually exclusive with
+.BR \-\-dups .
+.TP
+.BI \-\-min " N"
+For
+.BR \-\-dups / \-\-top :
+only report groups of at least
+.I N
+files (default: 2).
+.TP
+.B \-\-clean\-db
+Drop every grouper-owned derived table and
+.BR VACUUM ,
+returning their space \(em
+.B dir_pairs
+in particular can dwarf the sumtag tables it was derived from. All-or-nothing
+on purpose: the artifacts are interdependent, so a partial clean would leave
+a grouping that cannot be reported. Sumtag's own tables are never touched.
+Cannot be combined with any other action.
+.SH COMPARISON FUNCTIONS
+Similarity is size-normalised: two identical 10,000-file archives and two
+identical 3-file folders both score 1.0. Directories with no signature
+overlap always score 0.
+.TP
+.B digest
+Content only; a renamed file still matches.
+.TP
+.B name\-digest
+All-or-nothing per (name, digest) pair: a file counts only when both its
+basename and its digest agree.
+.TP
+.B name\-score
+The default. Name-anchored partial credit: one point for a shared basename,
+two more if the digests also agree.
+.SH INTERRUPTION
+An interrupted
+.B \-\-pairs
+run keeps its completed inserts, but the run is not marked finished: a
+partial pair table can never masquerade as a complete one, and
+.B \-\-threshold
+refuses it until a
+.B \-\-pairs
+run completes.
+.SH EXIT STATUS
+.B 0
+on success;
+.B 1
+when an error prevents the request from being answered (no stored pairs, a
+threshold below the stored floor, an unknown directory, and so on). Errors
+are reported on standard error.
+.SH EXAMPLES
+Build everything and group at 0.7:
+.PP
+.EX
+grouper \-\-database foo.sqlite \-\-prep \-\-threshold 0.7
+.EE
+.PP
+Regroup at a looser threshold (recomputes nothing):
+.PP
+.EX
+grouper \-\-database foo.sqlite \-\-threshold 0.5
+.EE
+.PP
+Report the stored grouping again:
+.PP
+.EX
+grouper \-\-database foo.sqlite
+.EE
+.PP
+Compare two directories:
+.PP
+.EX
+grouper \-\-database foo.sqlite \-\-compare /data/proj /backup/proj
+.EE
+.PP
+Prepare a very large corpus, keeping only meaningful pairs between
+same-named directories:
+.PP
+.EX
+grouper \-\-database big.sqlite \-\-prep \-\-name \-\-min\-sim 0.4 \-\-progress
+.EE
+.PP
+Return the space the derived tables occupy:
+.PP
+.EX
+grouper \-\-database foo.sqlite \-\-clean\-db
+.EE
+.SH NOTES
+.B grouper
+is experimental. Its derived tables go stale when sumtag rescans the
+filesystem; re-run the pipeline
+.RB ( \-\-prep )
+to refresh them. Duplicate detection is scoped to a single digest algorithm
+at a time: two identical files stamped under different algorithms are not
+found as duplicates.
+.SH SEE ALSO
+.BR sumtag (1),
+.BR dedupe (1)
+.SH AUTHOR
+The sumtag authors.

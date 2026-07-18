@@ -1,4 +1,4 @@
-"""Unit tests for dedupe.py (the experimental companion program).
+"""Unit tests for dedupe (the experimental companion program).
 
 Covers the synced flat walk, the trust-model vetoes, the safety refusals,
 the preview/arm split, the empty-directory carve-out, symlink rules, and
@@ -8,20 +8,13 @@ the placeholder cull root.
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import io
 import os
 import sqlite3
 import tempfile
 import unittest
 
-from sumtag import cli, schema, xattr
-
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_spec = importlib.util.spec_from_file_location(
-    "dedupe", os.path.join(_REPO_ROOT, "dedupe.py"))
-dedupe = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_spec and dedupe)
+from sumtag import cli, dedupe, schema, xattr
 
 
 def _write(root: str, rel: str, data: bytes) -> str:

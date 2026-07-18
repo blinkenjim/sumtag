@@ -388,7 +388,7 @@ NOTES
        precision, so the comparison is symmetric.
 
 SEE ALSO
-       xattr(1), getfattr(1), setfattr(1), cksum(1)
+       grouper(1), dedupe(1), xattr(1), getfattr(1), setfattr(1), cksum(1)
 
 AUTHOR
        The sumtag authors.
