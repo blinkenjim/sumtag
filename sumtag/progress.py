@@ -98,6 +98,21 @@ def _current_line_width() -> int:
 def _current_bar_width() -> int:
     return max(_current_line_width() - _FIXED_WIDTH, 1)
 
+
+def _write_line(line: str) -> None:
+    """One in-place redraw, hard-clamped to the terminal width.
+
+    A line longer than the terminal wraps onto a second row, after which
+    ``\\r`` and EL only ever reach the continuation row -- the first row
+    (most of the bar) is stranded onscreen amid normal output. The
+    per-field budgets can't guarantee fit on their own: binary human_size
+    renders 9 characters for values in the 1000-1023.9 band of a unit,
+    overflowing the 8-wide size and 10-wide rate fields, and a terminal
+    narrower than the fixed widths overflows regardless of the fields.
+    """
+    sys.stderr.write("\r" + line[:_current_line_width()] + "\033[K")
+    sys.stderr.flush()
+
 _BINARY_UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
 _SI_UNITS = ("B", "kB", "MB", "GB", "TB", "PB")
 
@@ -196,8 +211,7 @@ class Indicator:
             f"{frac * 100:>{_PCT_W}.0f}%  {elapsed_str:>{_ELAPSED_W}}  "
             f"ETA {eta_str:<{_ETA_W}}"
         )
-        sys.stderr.write("\r" + line + "\033[K")
-        sys.stderr.flush()
+        _write_line(line)
 
     def finish(self) -> None:
         if self._shown:
@@ -251,8 +265,7 @@ class CountIndicator:
             f"[{_render_bar(frac, bar_w)}] {frac * 100:>{_PCT_W}.0f}%  "
             f"{_format_elapsed(elapsed):>{_ELAPSED_W}}  ETA {eta:<{_ETA_W}}"
         )
-        sys.stderr.write("\r" + line + "\033[K")
-        sys.stderr.flush()
+        _write_line(line)
 
     def interrupt(self) -> None:
         """Clear the line so a normal output line prints cleanly; the bar

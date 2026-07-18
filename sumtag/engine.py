@@ -426,9 +426,13 @@ def _stamp(roots, args, rep: _Reporter, stats: RunStats, store,
                 else:
                     rep.announce(path, f"hash {path} ({reason})", prefix)
                     ind = progress_mod.make(st.st_size, args.progress, args.si)
-                    digest = hashing.hash_file(path, progress=ind)
-                    if ind is not None:
-                        ind.finish()
+                    try:
+                        digest = hashing.hash_file(path, progress=ind)
+                    finally:
+                        # A read that fails mid-hash must still clear the bar,
+                        # or the error line prints appended to the stranded bar.
+                        if ind is not None:
+                            ind.finish()
                     meta = schema.build_meta({schema.ALGO: digest}, live, run_started)
                     xattr.set(path, schema.XATTR_NAME, schema.dumps(meta))
                 stats.hashed += 1
@@ -499,9 +503,13 @@ def _verify(roots, args, rep: _Reporter, stats: RunStats,
             computed = {}
             for algo in meta["digests"]:
                 ind = progress_mod.make(st.st_size, args.progress, args.si)
-                computed[algo] = hashing.hash_file(path, progress=ind)
-                if ind is not None:
-                    ind.finish()
+                try:
+                    computed[algo] = hashing.hash_file(path, progress=ind)
+                finally:
+                    # Same rule as the stamp pass: a mid-read failure must
+                    # still clear the bar before the error prints.
+                    if ind is not None:
+                        ind.finish()
             if prescan is not None:
                 bytes_so_far += st.st_size
             stats.verified += 1
