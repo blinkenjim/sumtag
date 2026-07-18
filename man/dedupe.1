@@ -6,6 +6,7 @@ dedupe \- delete files from a cull tree that duplicate an actual tree
 .BI \-\-database " DB"
 .RB [ \-\-delete ]
 .RB [ \-\-allow\-mixed ]
+.RB [ \-n ", " \-\-offline ]
 .I ACTUAL CULL
 .SH DESCRIPTION
 .B dedupe
@@ -129,6 +130,44 @@ Pass the roots spelled as sumtag scanned them: row lookups use the absolute
 path as given, exactly as sumtag records paths, so a differently-spelled
 root (for example through a symlinked path component) fails the
 must-know-both-roots check with a clear error rather than matching nothing.
+.SH OFFLINE PREDICTION
+With
+.B \-n
+.RB ( \-\-offline ),
+.B dedupe
+answers \(lqwhat
+.I might
+be deleted\(rq from the database alone: no filesystem access at all, so
+neither root needs to be mounted. The roots are resolved against the
+.I stored
+mount points, the flat same-relative-directory match runs over the database
+rows, and each candidate prints as
+.B might delete
+\(em deliberately not
+.BR "would delete" ,
+because this is a prediction, not a plan. Everything the filesystem would
+have contributed is skipped: the three trust-model vetoes, the
+.BR realpath (3)
+identity checks,
+.B @sumtag\-ignore
+fences, and all sweep and directory-removal predictions (files the database
+never stamped are invisible, so it can never know a directory would empty).
+Two row-only checks remain: the collision-insurance size comparison, where a
+.B \-\-locate
+run has recorded sizes on both sides, and a note when a candidate shares its
+recorded inode with its witness (a hard link or an alias \(em a live run
+decides which). The bare live preview remains the only exact one.
+.PP
+The run is announced with an
+.B offline:
+line so a consumer of the prediction knows what it is consuming, the
+database is opened read-only, and
+.B \-n
+conflicts with
+.B \-\-delete
+\(em a prediction cannot arm. Exit status is unchanged: 1 means candidates
+were found, 2 covers errors and refusals (including a recorded-size
+mismatch).
 .SH OPTIONS
 .TP
 .BI \-\-database " DB"
@@ -144,6 +183,13 @@ Proceed even when the roots carry more than one digest algorithm.
 Cross-algorithm duplicates silently survive; see
 .B SAFETY CHECKS
 above.
+.TP
+.BR \-n ", " \-\-offline
+Predict what might be deleted from the database alone, with no filesystem
+access; neither root needs to be mounted. See
+.B OFFLINE PREDICTION
+above. Conflicts with
+.BR \-\-delete .
 .SH RUN SUMMARY
 Every run ends with a summary block: files deleted (or would-delete) and
 their cumulative size, items swept, directories removed, files kept (broken
@@ -178,6 +224,12 @@ Actually delete:
 .PP
 .EX
 dedupe \-\-database /var/lib/sumtag.sqlite \-\-delete /data/proj /backup/proj\-old
+.EE
+.PP
+Predict what might be deleted while the backup drive is unplugged:
+.PP
+.EX
+dedupe \-\-database /var/lib/sumtag.sqlite \-n /data/proj /backup/proj\-old
 .EE
 .SH NOTES
 .B dedupe

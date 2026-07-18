@@ -116,6 +116,23 @@ would-sweep, and would-rmdir printed, nothing touched, database opened
 read-only. Deletion requires the explicit --delete flag. This inverts
 sumtag's -n convention on purpose; lethality earns opt-in, not opt-out.
 
+Offline prediction (-n/--offline, added 2026-07-17): answers "what MIGHT
+be deleted" from the database alone -- no filesystem access at all, so
+neither root needs to be mounted. Roots are resolved against the STORED
+mountpoints (longest lexical prefix first, then the macOS firmlink
+rebase, the database's own rows arbitrating -- see Side.offline; spell
+them as sumtag recorded them, same path discipline as ever), the flat
+same-relative-directory match runs over the rows, and every filesystem
+truth is skipped: the three trust vetoes, the realpath/identity checks,
+fences, sweeps, and rmdirs (files the database never stamped are
+invisible, so it can never know a directory would empty). The verb is
+"might delete" because this is a prediction, not a plan -- the live
+preview remains the only exact one. Two row-only checks survive: the
+collision-insurance size comparison, where --locate populated sizes on
+both sides, and a shared-inode note (hard link or alias -- a live run
+decides which). Conflicts with --delete: a prediction cannot arm. The
+database is opened read-only; nothing anywhere is modified.
+
 Exit status (house 0/1/2): 0 = nothing redundant found; 1 = duplicates
 found (deleted, or would-delete under preview); 2 = errors or a safety
 refusal prevented a complete, clean run. Ctrl-C prints the same summary
@@ -126,6 +143,11 @@ sumtag's convention.
 Usage:
     dedupe --database DB ACTUAL CULL              # preview (default)
     dedupe --database DB ACTUAL CULL --delete     # actually delete
+    dedupe --database DB ACTUAL CULL -n           # offline: what MIGHT be
+                                                  #   deleted, predicted from
+                                                  #   the database alone
+                                                  #   (roots need not be
+                                                  #   mounted)
     dedupe --database DB ACTUAL CULL --allow-mixed ...
 """
 
@@ -193,14 +215,25 @@ class Db:
         if dir_rel:
             prefix = dir_rel + "/"
             return self._conn.execute(
-                "SELECT rel_path, algo, digest FROM files "
+                "SELECT rel_path, algo, digest, size, inode FROM files "
                 "WHERE mountpoint_id = ? AND substr(rel_path, 1, ?) = ? "
                 "AND instr(substr(rel_path, ?), '/') = 0",
                 (mp_id, len(prefix), prefix, len(prefix) + 1)).fetchall()
         return self._conn.execute(
-            "SELECT rel_path, algo, digest FROM files "
+            "SELECT rel_path, algo, digest, size, inode FROM files "
             "WHERE mountpoint_id = ? AND instr(rel_path, '/') = 0",
             (mp_id,)).fetchall()
+
+    def rows_under(self, mp_id: int, rel_prefix: str) -> list[sqlite3.Row]:
+        """Every row under the prefix, for the offline prediction."""
+        where, params = self._prefix_where(rel_prefix)
+        return self._conn.execute(
+            f"SELECT rel_path, algo, digest, size, inode FROM files "
+            f"WHERE mountpoint_id = ?{where}", [mp_id] + params).fetchall()
+
+    def mountpoints(self) -> list[sqlite3.Row]:
+        return self._conn.execute(
+            "SELECT id, path FROM mountpoints").fetchall()
 
     def delete_row(self, mp_id: int, rel_path: str) -> None:
         self._conn.execute(
@@ -236,6 +269,40 @@ class Side:
         self.base_rel = "" if rel == "." else rel
         self.mp_id = db.mountpoint_id(self.mount)
 
+    @classmethod
+    def offline(cls, given: str, db: Db) -> "Side | None":
+        """Resolve a root against the STORED mountpoints -- no statfs, no
+        filesystem at all, so the root need not exist. Both rel forms
+        store._relativize can emit are generated lexically per mountpoint:
+        the plain relpath (which for a firmlinked path escapes upward,
+        ``../../../var/...`` -- exactly what stamping recorded) and the
+        rooted rebase. Neither can be samefile-verified offline, so the
+        database's own rows arbitrate: the first candidate that actually
+        holds rows wins, preferring non-escaping forms on the deepest
+        mount. A candidate-less root (empty mountpoints table) is None; a
+        rowless one resolves to its best guess and fails the no-rows
+        safety check with the usual message."""
+        side = cls.__new__(cls)
+        side.given = given
+        side.root = os.path.abspath(given)
+        side.real = side.root  # realpath needs the filesystem; unused here
+        candidates = []
+        for row in db.mountpoints():
+            mp = row["path"]
+            lexical = os.path.relpath(side.root, mp)   # may escape upward
+            rebased = os.path.relpath(side.root, "/")  # the firmlink rebase
+            for rel in dict.fromkeys((lexical, rebased)):
+                candidates.append((mp, "" if rel == "." else rel, row["id"]))
+        candidates.sort(key=lambda t: (t[1].startswith(".."), -len(t[0])))
+        if not candidates:
+            return None
+        for cand in candidates:
+            if db.count_under(cand[2], cand[1]):
+                side.mount, side.base_rel, side.mp_id = cand
+                return side
+        side.mount, side.base_rel, side.mp_id = candidates[0]
+        return side
+
     def dir_rel(self, walk_rel: str) -> str:
         """The database rel_path of a walk-relative directory."""
         parts = [p for p in (self.base_rel, walk_rel) if p]
@@ -249,11 +316,13 @@ class Run:
 
     def __init__(self, args, db: Db, actual: Side, cull: Side) -> None:
         self.armed = args.delete
+        self.offline = args.offline
         self.db = db
         self.actual = actual
         self.cull = cull
         self.deleted = 0
         self.deleted_bytes = 0
+        self.unsized = 0      # offline candidates whose row has no size
         self.swept = 0
         self.rmdirs = 0
         self.kept_unique = 0
@@ -263,7 +332,8 @@ class Run:
         self.errors = 0
 
     def say(self, verb: str, path: str) -> None:
-        print(f"{'' if self.armed else 'would '}{verb} {path}")
+        mood = "" if self.armed else ("might " if self.offline else "would ")
+        print(f"{mood}{verb} {path}")
 
     def warn(self, msg: str) -> None:
         print(f"dedupe: {msg}", file=sys.stderr)
@@ -516,6 +586,62 @@ def process_pair(run: Run, walk_rel: str, is_root: bool = False) -> bool:
     return _sweep_and_rmdir(run, c_dir, sweepables, c_dir_rel, is_root)
 
 
+def _rooted(side: Side, rel_path: str) -> str:
+    """A row's path spelled under the root as the user gave it -- the same
+    spelling the live walk prints -- rather than recomposed from the
+    stored mountpoint (which for a firmlinked path reads
+    /System/Volumes/Data/...)."""
+    tail = rel_path[len(side.base_rel) + 1:] if side.base_rel else rel_path
+    return os.path.join(side.root, tail)
+
+
+def offline_pass(run: Run) -> None:
+    """The -n prediction: the flat same-relative-directory match, run
+    entirely over database rows. No filesystem access -- the trust vetoes,
+    identity checks, fences, sweeps, and rmdirs are all skipped (files the
+    database never stamped are invisible, so it can never know a directory
+    would empty). Two row-only checks survive: the collision-insurance
+    size comparison where --locate populated sizes on both sides, and a
+    shared-inode note."""
+    by_dir: dict[str, list[sqlite3.Row]] = {}
+    for row in run.db.rows_under(run.cull.mp_id, run.cull.base_rel):
+        by_dir.setdefault(os.path.dirname(row["rel_path"]), []).append(row)
+    base = run.cull.base_rel
+    for d in sorted(by_dir):
+        walk_rel = d[len(base):].lstrip("/") if base else d
+        witnesses: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        for arow in run.db.rows_in_dir(run.actual.mp_id,
+                                       run.actual.dir_rel(walk_rel)):
+            witnesses.setdefault((arow["algo"], arow["digest"]),
+                                 []).append(arow)
+        for row in sorted(by_dir[d], key=lambda r: r["rel_path"]):
+            path = _rooted(run.cull, row["rel_path"])
+            matches = witnesses.get((row["algo"], row["digest"]))
+            if not matches:
+                run.kept_unique += 1
+                continue
+            sizes = [m["size"] for m in matches]
+            if row["size"] is not None and all(s is not None for s in sizes) \
+                    and row["size"] not in sizes:
+                witness = _rooted(run.actual, matches[0]["rel_path"])
+                run.warn(f"{path}: MISMATCH: digest matches {witness} but "
+                         f"recorded sizes differ ({row['size']} vs "
+                         f"{sizes[0]}); kept")
+                run.errors += 1
+                continue
+            if run.actual.mp_id == run.cull.mp_id and \
+                    any(m["inode"] == row["inode"] for m in matches):
+                run.warn(f"{path}: same recorded inode as its witness; a "
+                         f"live run decides hard link (delete) vs alias "
+                         f"(keep)")
+            run.say("delete", path)
+            run.deleted += 1
+            if row["size"] is not None:
+                run.deleted_bytes += row["size"]
+            else:
+                run.unsized += 1
+
+
 # --- Safety checks and CLI ---------------------------------------------------
 
 def _safety_checks(args) -> tuple[Db, Side, Side] | str:
@@ -537,20 +663,64 @@ def _safety_checks(args) -> tuple[Db, Side, Side] | str:
         return str(e)
 
     actual, cull = Side(args.actual, db), Side(args.cull, db)
+    err = _knows_roots(db, actual, cull, args.allow_mixed)
+    if err is not None:
+        db.close()
+        return err
+    return db, actual, cull
+
+
+def _knows_roots(db: Db, actual: Side, cull: Side,
+                 allow_mixed: bool) -> str | None:
+    """The tail both safety paths share: the database must hold rows under
+    both roots, under one digest algorithm unless --allow-mixed."""
     algos: set[str] = set()
     for side, label in ((actual, "ACTUAL"), (cull, "CULL")):
         if side.mp_id is None or \
                 db.count_under(side.mp_id, side.base_rel) == 0:
-            db.close()
             return (f"{side.given}: no database rows under this {label} root "
                     f"(mounted at {side.mount}); scan it with sumtag first")
         algos |= db.algos_under(side.mp_id, side.base_rel)
-    if len(algos) > 1 and not args.allow_mixed:
-        db.close()
+    if len(algos) > 1 and not allow_mixed:
         return (f"mixed digest algorithms under these roots "
                 f"({', '.join(sorted(algos))}): cross-algorithm duplicates "
                 f"cannot match and would silently survive; pass "
                 f"--allow-mixed to proceed anyway")
+    return None
+
+
+def _offline_checks(args) -> tuple[Db, Side, Side] | str:
+    """The -n counterpart of _safety_checks: nothing may touch the
+    filesystem, so existence and realpath are out. Roots resolve lexically
+    against the stored mountpoints, disjointness is checked on the resolved
+    (mountpoint, rel-prefix) identities, and the no-rows and
+    mixed-algorithm refusals hold unchanged."""
+    try:
+        db = Db(args.database, writable=False)
+    except (FileNotFoundError, sqlite3.OperationalError) as e:
+        return str(e)
+
+    sides = []
+    for given, label in ((args.actual, "ACTUAL"), (args.cull, "CULL")):
+        side = Side.offline(given, db)
+        if side is None:
+            db.close()
+            return (f"{given}: no stored mountpoint contains this {label} "
+                    f"root; spell it as sumtag recorded it")
+        sides.append(side)
+    actual, cull = sides
+    if actual.mp_id == cull.mp_id:
+        a, c = actual.base_rel, cull.base_rel
+        if a == c:
+            db.close()
+            return "ACTUAL and CULL are the same directory"
+        if not a or not c or c.startswith(a + "/") or a.startswith(c + "/"):
+            db.close()
+            return "ACTUAL and CULL overlap (one contains the other)"
+    err = _knows_roots(db, actual, cull, args.allow_mixed)
+    if err is not None:
+        db.close()
+        return err
     return db, actual, cull
 
 
@@ -575,18 +745,35 @@ def main(argv: list[str] | None = None) -> int:
                         help="proceed even when the roots carry more than "
                              "one digest algorithm (cross-algorithm "
                              "duplicates silently survive)")
+    parser.add_argument("-n", "--offline", action="store_true",
+                        help="predict what MIGHT be deleted from the "
+                             "database alone: no filesystem access, so "
+                             "neither root needs to be mounted; the trust "
+                             "vetoes and every filesystem check are skipped "
+                             "(the bare live preview stays the exact one)")
     args = parser.parse_args(argv)
+    if args.offline and args.delete:
+        parser.error("--delete conflicts with -n/--offline "
+                     "(a prediction cannot arm)")
 
-    checked = _safety_checks(args)
+    checked = _offline_checks(args) if args.offline else _safety_checks(args)
     if isinstance(checked, str):
         print(f"dedupe: {checked}", file=sys.stderr)
         return EXIT_ERRORS
     db, actual, cull = checked
 
+    if args.offline:
+        # Approximation by consent, announced -- the sumtag idiom.
+        print("offline: predicting from database contents alone "
+              "(trust vetoes and filesystem checks skipped)")
+
     run = Run(args, db, actual, cull)
     interrupted = False
     try:
-        process_pair(run, "", is_root=True)
+        if args.offline:
+            offline_pass(run)
+        else:
+            process_pair(run, "", is_root=True)
     except KeyboardInterrupt:
         interrupted = True  # commits are per directory; counters are honest
     finally:
@@ -594,10 +781,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if interrupted:
         print("interrupted")
-    verb = "deleted" if run.armed else "would delete"
+    verb = "deleted" if run.armed else (
+        "might delete" if run.offline else "would delete")
     kept = run.kept_unique + run.kept_unknown + run.kept_stale
+    size_note = human_size(run.deleted_bytes, False)
+    if run.unsized:
+        size_note += f" (+{run.unsized} of unknown size)"
     pairs = [(verb, f"{run.deleted} file{'s' if run.deleted != 1 else ''}, "
-                    f"{human_size(run.deleted_bytes, False)}")]
+                    f"{size_note}")]
     if run.swept:
         pairs.append(("swept" if run.armed else "would sweep",
                       f"{run.swept} item{'s' if run.swept != 1 else ''}"))

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -326,6 +327,124 @@ class DedupeTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(dup))
         self.assertTrue(os.path.exists(wit), "the data keeps its actual name")
         self.assertIn("hard link", err)
+
+
+class OfflineTests(unittest.TestCase):
+    """The -n/--offline prediction: database-only, no filesystem access."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.actual = os.path.join(self._tmp.name, "actual")
+        self.cull = os.path.join(self._tmp.name, "cull")
+        self.db = os.path.join(self._tmp.name, "db.sqlite")
+        os.makedirs(self.actual)
+        os.makedirs(self.cull)
+
+    def _offline(self, *extra: str) -> tuple[int, str, str]:
+        return _run(["--database", self.db, self.actual, self.cull,
+                     "-n", *extra])
+
+    def test_predicts_with_both_trees_gone(self):
+        # The whole point: after the "drive" disappears, the prediction
+        # still runs from rows alone.
+        _write(self.actual, "a.txt", b"same")
+        _write(self.cull, "sub/b.txt", b"same")
+        _write(self.actual, "sub/w.txt", b"same")
+        _stamp(self.db, self.actual, self.cull)
+        shutil.rmtree(self.actual)
+        shutil.rmtree(self.cull)
+        code, out, _ = self._offline()
+        self.assertEqual(code, 1)
+        self.assertIn("might delete", out)
+        self.assertIn(os.path.join(self.cull, "sub", "b.txt"), out)
+        self.assertIn("offline: predicting from database contents alone",
+                      out)
+        self.assertNotIn("would delete", out)
+        self.assertNotIn("rmdir", out)
+
+    def test_touches_nothing_not_even_the_database(self):
+        _write(self.actual, "a.txt", b"same")
+        _write(self.cull, "b.txt", b"same")
+        _stamp(self.db, self.actual, self.cull)
+        conn = sqlite3.connect(self.db)
+        before = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        conn.close()
+        code, _, _ = self._offline()
+        self.assertEqual(code, 1)
+        self.assertTrue(os.path.exists(os.path.join(self.cull, "b.txt")))
+        conn = sqlite3.connect(self.db)
+        after = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        conn.close()
+        self.assertEqual(before, after)
+
+    def test_same_relative_directory_rule_holds_offline(self):
+        # Same digest in a *different* relative directory witnesses nothing,
+        # exactly like the live walk.
+        _write(self.actual, "sub/a.txt", b"same")
+        _write(self.cull, "b.txt", b"same")
+        _stamp(self.db, self.actual, self.cull)
+        code, out, _ = self._offline()
+        self.assertEqual(code, 0)
+        self.assertNotIn("might delete " + os.path.join(self.cull, "b.txt"),
+                         out)
+
+    def test_conflicts_with_delete(self):
+        with self.assertRaises(SystemExit) as ctx:
+            _run(["--database", self.db, self.actual, self.cull,
+                  "-n", "--delete"])
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_unknown_root_is_exit_2(self):
+        # A root with no rows (a wrong spelling, say) is a refusal, not a
+        # silent zero-match run.
+        _write(self.actual, "a.txt", b"same")
+        _write(self.cull, "b.txt", b"same")
+        _stamp(self.db, self.actual, self.cull)
+        nowhere = os.path.join(self._tmp.name, "nowhere")
+        code, _, err = _run(["--database", self.db, self.actual, nowhere,
+                             "-n"])
+        self.assertEqual(code, 2)
+        self.assertIn("no database rows", err)
+
+    def test_overlapping_roots_refused_offline(self):
+        _write(self.actual, "sub/a.txt", b"same")
+        _stamp(self.db, self.actual)
+        code, _, err = _run(["--database", self.db, self.actual,
+                             os.path.join(self.actual, "sub"), "-n"])
+        self.assertEqual(code, 2)
+        self.assertIn("overlap", err)
+
+    def test_recorded_size_mismatch_is_refused_loudly(self):
+        # --locate populates sizes; a doctored row simulates the collision
+        # case (same digest, different recorded size).
+        _write(self.actual, "a.txt", b"same")
+        _write(self.cull, "b.txt", b"same")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["--sum", "--locate", "-q",
+                             "--database", self.db, self.actual, self.cull])
+        self.assertEqual(code, 0, err.getvalue())
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE files SET size = 999 "
+                     "WHERE rel_path LIKE '%b.txt'")
+        conn.commit()
+        conn.close()
+        code, out, err = self._offline()
+        self.assertEqual(code, 2)
+        self.assertIn("MISMATCH", err)
+        self.assertIn("might delete: 0 files", out)
+        self.assertNotIn("might delete /", out)
+
+    def test_unknown_sizes_are_flagged_in_the_summary(self):
+        # Stamped without --locate, sizes are NULL: the byte total can't
+        # be known and the summary says so.
+        _write(self.actual, "a.txt", b"same")
+        _write(self.cull, "b.txt", b"same")
+        _stamp(self.db, self.actual, self.cull)
+        code, out, _ = self._offline()
+        self.assertEqual(code, 1)
+        self.assertIn("of unknown size", out)
 
 
 if __name__ == "__main__":

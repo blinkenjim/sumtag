@@ -4,7 +4,8 @@ NAME
        dedupe - delete files from a cull tree that duplicate an actual tree
 
 SYNOPSIS
-       dedupe --database DB [--delete] [--allow-mixed] ACTUAL CULL
+       dedupe --database DB [--delete] [--allow-mixed] [-n, --offline] ACTUAL
+       CULL
 
 DESCRIPTION
        dedupe dismantles a redundant copy of a directory tree.	ACTUAL is the
@@ -114,6 +115,28 @@ SAFETY CHECKS
        fails the must-know-both-roots check with a clear error rather than
        matching nothing.
 
+OFFLINE PREDICTION
+       With -n (--offline), dedupe answers “what might be deleted” from the
+       database alone: no filesystem access at all, so neither root needs to be
+       mounted. The roots are resolved against the stored mount points, the flat
+       same-relative-directory match runs over the database rows, and each
+       candidate prints as might delete — deliberately not would delete, because
+       this is a prediction, not a plan. Everything the filesystem would have
+       contributed is skipped: the three trust-model vetoes, the realpath(3)
+       identity checks, @sumtag-ignore fences, and all sweep and directory-
+       removal predictions (files the database never stamped are invisible, so
+       it can never know a directory would empty).  Two row-only checks remain:
+       the collision-insurance size comparison, where a --locate run has
+       recorded sizes on both sides, and a note when a candidate shares its
+       recorded inode with its witness (a hard link or an alias — a live run
+       decides which). The bare live preview remains the only exact one.
+
+       The run is announced with an offline: line so a consumer of the
+       prediction knows what it is consuming, the database is opened read-only,
+       and -n conflicts with --delete — a prediction cannot arm. Exit status is
+       unchanged: 1 means candidates were found, 2 covers errors and refusals
+       (including a recorded-size mismatch).
+
 OPTIONS
        --database DB
 	      Path to the sumtag SQLite database that knows both trees.
@@ -129,6 +152,11 @@ OPTIONS
 	      Proceed even when the roots carry more than one digest algorithm.
 	      Cross-algorithm duplicates silently survive; see SAFETY CHECKS
 	      above.
+
+       -n, --offline
+	      Predict what might be deleted from the database alone, with no
+	      filesystem access; neither root needs to be mounted. See OFFLINE
+	      PREDICTION above. Conflicts with --delete.
 
 RUN SUMMARY
        Every run ends with a summary block: files deleted (or would-delete) and
@@ -157,6 +185,10 @@ EXAMPLES
        Actually delete:
 
        dedupe --database /var/lib/sumtag.sqlite --delete /data/proj /backup/proj-old
+
+       Predict what might be deleted while the backup drive is unplugged:
+
+       dedupe --database /var/lib/sumtag.sqlite -n /data/proj /backup/proj-old
 
 NOTES
        dedupe is experimental — and it is the dangerous companion: always
