@@ -1327,7 +1327,7 @@ def report_dups(conn: sqlite3.Connection, min_count: int,
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="grouper.py",
+        prog="grouper",
         description="Find groups of directories with identical or similar "
                     "contents in a sumtag database. With no action flags, "
                     "reports the stored grouping.",

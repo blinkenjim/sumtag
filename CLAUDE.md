@@ -241,7 +241,7 @@ There is no mtime comparison and nothing is computed: a file either has a `user.
 
 ## Experimental companion programs
 
-Repo-root scripts that sit *outside* the installed `sumtag` package. They are the "higher-level tooling" playground CLAUDE.md keeps pointing at: they consume the sumtag database and never touch xattrs or file contents. Experimental status does not exempt a program from being documented here.
+Repo-root modules that sit *outside* the `sumtag` package. They are the "higher-level tooling" playground CLAUDE.md keeps pointing at: they consume the sumtag database and never touch xattrs or file contents. Experimental status does not exempt a program from being documented here — nor from being installed: each companion gets its own `console_scripts` entry point in `pyproject.toml` (added 2026-07-17, when `grouper --help` turned out to be a "not found"), so installing sumtag also puts the companion commands on `PATH` (`grouper` from `grouper:main`, via `py-modules`). Outside-the-package refers to code layout (top-level modules, importable and runnable as `python3 grouper.py` from a checkout), not to being left out of the install.
 
 ### grouper.py
 

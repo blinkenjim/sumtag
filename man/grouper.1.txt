@@ -1,14 +1,14 @@
 GROUPER(1)                       User Commands                      GROUPER(1)
 
 NAME
-       grouper.py - find groups of directories with identical or similar
-       contents in a sumtag database
+       grouper - find groups of directories with identical or similar contents
+       in a sumtag database
 
 SYNOPSIS
-       grouper.py --database DB [ACTION] [OPTIONS]
+       grouper --database DB [ACTION] [OPTIONS]
 
 DESCRIPTION
-       grouper.py is an experimental companion program to sumtag(1).  It reads
+       grouper is an experimental companion program to sumtag(1).  It reads
        the files/mountpoints tables of a sumtag SQLite database and finds
        groups of directories whose contents are identical or nearly so -- for
        example, two slightly different copies of the same project, or the five
@@ -185,53 +185,53 @@ EXAMPLES
        Build everything and group at a moderate similarity bar, in one
        invocation:
 
-       grouper.py --database /var/lib/sumtag.sqlite --prep --threshold 0.7
+       grouper --database /var/lib/sumtag.sqlite --prep --threshold 0.7
 
        Tighten the grouping to near-identical directories only. The expensive
        pair table is already stored, so this regroups in seconds and
        recomputes nothing:
 
-       grouper.py --database /var/lib/sumtag.sqlite --threshold 0.9999
+       grouper --database /var/lib/sumtag.sqlite --threshold 0.9999
 
        Print the stored grouping again, touching nothing:
 
-       grouper.py --database /var/lib/sumtag.sqlite
+       grouper --database /var/lib/sumtag.sqlite
 
        The space-hunting view: the same grouping ordered by each group's total
        subtree size, so the report leads with the largest duplicated trees --
        typically worth capturing to a file:
 
-       grouper.py --database /var/lib/sumtag.sqlite --sort tree-size > groups.out
+       grouper --database /var/lib/sumtag.sqlite --sort tree-size > groups.out
 
        Rebuild the pair table on an archive-scale corpus: candidate nomination
        (share a token seen in at most 1000 directories), keep only pairs
        scoring at least 0.5, cap worker memory at four processes, and watch
        progress:
 
-       grouper.py --database big.sqlite --pairs --max-df 1000 \
+       grouper --database big.sqlite --pairs --max-df 1000 \
            --min-sim 0.5 --jobs 4 --progress
 
        Ask why (or how much) two specific directories resemble each other, and
        see what the index recorded for one of them:
 
-       grouper.py --database db.sqlite --compare /mnt/a/proj /mnt/b/proj
-       grouper.py --database db.sqlite --ls /mnt/a/proj
+       grouper --database db.sqlite --compare /mnt/a/proj /mnt/b/proj
+       grouper --database db.sqlite --ls /mnt/a/proj
 
        Duplicate files rather than directories -- every digest shared by at
        least three files, then the ten most frequent checksums:
 
-       grouper.py --database db.sqlite --dups --min 3
-       grouper.py --database db.sqlite --top 10
+       grouper --database db.sqlite --dups --min 3
+       grouper --database db.sqlite --top 10
 
        Content-only grouping, so wholesale renames still match:
 
-       grouper.py --database db.sqlite --pairs --fn digest
-       grouper.py --database db.sqlite --threshold 0.9
+       grouper --database db.sqlite --pairs --fn digest
+       grouper --database db.sqlite --threshold 0.9
 
        Rebuild everything with junk filtering off, to ask whether hidden trees
        (here, trash contents) are duplicated elsewhere:
 
-       grouper.py --database db.sqlite --no-junk-filter --prep --threshold 0.9
+       grouper --database db.sqlite --no-junk-filter --prep --threshold 0.9
 
 EXIT STATUS
        0 on success; 1 if an error prevented the request from being answered

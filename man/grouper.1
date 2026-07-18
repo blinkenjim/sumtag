@@ -1,14 +1,14 @@
 .TH GROUPER 1 "July 2026" "sumtag 0.1.0" "User Commands"
 .SH NAME
-grouper.py \- find groups of directories with identical or similar contents in a sumtag database
+grouper \- find groups of directories with identical or similar contents in a sumtag database
 .SH SYNOPSIS
-.B grouper.py
+.B grouper
 .B \-\-database
 .I DB
 .RI [ ACTION ]
 .RI [ OPTIONS ]
 .SH DESCRIPTION
-.B grouper.py
+.B grouper
 is an experimental companion program to
 .BR sumtag (1).
 It reads the
@@ -239,20 +239,20 @@ outright rather than producing a silently meaningless ordering.
 Build everything and group at a moderate similarity bar, in one invocation:
 .PP
 .EX
-grouper.py \-\-database /var/lib/sumtag.sqlite \-\-prep \-\-threshold 0.7
+grouper \-\-database /var/lib/sumtag.sqlite \-\-prep \-\-threshold 0.7
 .EE
 .PP
 Tighten the grouping to near-identical directories only. The expensive pair
 table is already stored, so this regroups in seconds and recomputes nothing:
 .PP
 .EX
-grouper.py \-\-database /var/lib/sumtag.sqlite \-\-threshold 0.9999
+grouper \-\-database /var/lib/sumtag.sqlite \-\-threshold 0.9999
 .EE
 .PP
 Print the stored grouping again, touching nothing:
 .PP
 .EX
-grouper.py \-\-database /var/lib/sumtag.sqlite
+grouper \-\-database /var/lib/sumtag.sqlite
 .EE
 .PP
 The space-hunting view: the same grouping ordered by each group's total
@@ -260,7 +260,7 @@ subtree size, so the report leads with the largest duplicated trees \(em
 typically worth capturing to a file:
 .PP
 .EX
-grouper.py \-\-database /var/lib/sumtag.sqlite \-\-sort tree\-size > groups.out
+grouper \-\-database /var/lib/sumtag.sqlite \-\-sort tree\-size > groups.out
 .EE
 .PP
 Rebuild the pair table on an archive-scale corpus: candidate nomination
@@ -268,7 +268,7 @@ Rebuild the pair table on an archive-scale corpus: candidate nomination
 least 0.5, cap worker memory at four processes, and watch progress:
 .PP
 .EX
-grouper.py \-\-database big.sqlite \-\-pairs \-\-max\-df 1000 \e
+grouper \-\-database big.sqlite \-\-pairs \-\-max\-df 1000 \e
     \-\-min\-sim 0.5 \-\-jobs 4 \-\-progress
 .EE
 .PP
@@ -276,30 +276,30 @@ Ask why (or how much) two specific directories resemble each other, and see
 what the index recorded for one of them:
 .PP
 .EX
-grouper.py \-\-database db.sqlite \-\-compare /mnt/a/proj /mnt/b/proj
-grouper.py \-\-database db.sqlite \-\-ls /mnt/a/proj
+grouper \-\-database db.sqlite \-\-compare /mnt/a/proj /mnt/b/proj
+grouper \-\-database db.sqlite \-\-ls /mnt/a/proj
 .EE
 .PP
 Duplicate files rather than directories \(em every digest shared by at least
 three files, then the ten most frequent checksums:
 .PP
 .EX
-grouper.py \-\-database db.sqlite \-\-dups \-\-min 3
-grouper.py \-\-database db.sqlite \-\-top 10
+grouper \-\-database db.sqlite \-\-dups \-\-min 3
+grouper \-\-database db.sqlite \-\-top 10
 .EE
 .PP
 Content-only grouping, so wholesale renames still match:
 .PP
 .EX
-grouper.py \-\-database db.sqlite \-\-pairs \-\-fn digest
-grouper.py \-\-database db.sqlite \-\-threshold 0.9
+grouper \-\-database db.sqlite \-\-pairs \-\-fn digest
+grouper \-\-database db.sqlite \-\-threshold 0.9
 .EE
 .PP
 Rebuild everything with junk filtering off, to ask whether hidden trees
 (here, trash contents) are duplicated elsewhere:
 .PP
 .EX
-grouper.py \-\-database db.sqlite \-\-no\-junk\-filter \-\-prep \-\-threshold 0.9
+grouper \-\-database db.sqlite \-\-no\-junk\-filter \-\-prep \-\-threshold 0.9
 .EE
 .SH EXIT STATUS
 .B 0
