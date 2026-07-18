@@ -25,7 +25,7 @@ There are also inspection helpers:
 ```bash
 python3 grouper.py --database foo.sqlite --ls DIR          # list a directory's indexed files
 python3 grouper.py --database foo.sqlite --compare A B     # similarity (0.0–1.0) of two dirs
-python3 grouper.py --database foo.sqlite --dups [--min N]  # duplicate-files report
+python3 grouper.py --database foo.sqlite --dupes [--min N] # duplicate-files report
 python3 grouper.py --database foo.sqlite --top [N]         # N (default 1) most frequent
                                                            #   checksums, excluding empty files
 ```

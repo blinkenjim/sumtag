@@ -175,7 +175,7 @@ mount-relative path).
 Print the similarity (0.0\-1.0) of two directories' contents under the
 selected comparison function.
 .TP
-.B \-\-dups
+.B \-\-dupes
 Report duplicate files (same digest) across the whole database \(em files,
 not directories.
 .TP
@@ -187,7 +187,7 @@ empty files.
 .TP
 .BI \-\-min " N"
 For
-.BR \-\-dups / \-\-top :
+.BR \-\-dupes / \-\-top :
 only report groups of at least
 .I N
 files (default 2).
@@ -284,7 +284,7 @@ Duplicate files rather than directories \(em every digest shared by at least
 three files, then the ten most frequent checksums:
 .PP
 .EX
-grouper \-\-database db.sqlite \-\-dups \-\-min 3
+grouper \-\-database db.sqlite \-\-dupes \-\-min 3
 grouper \-\-database db.sqlite \-\-top 10
 .EE
 .PP

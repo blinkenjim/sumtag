@@ -138,7 +138,8 @@ OPTIONS
               Print the similarity (0.0-1.0) of two directories' contents
               under the selected comparison function.
 
-       --dups Report duplicate files (same digest) across the whole database
+       --dupes
+              Report duplicate files (same digest) across the whole database
               -- files, not directories.
 
        --top [N]
@@ -146,7 +147,7 @@ OPTIONS
               their files, excluding empty files.
 
        --min N
-              For --dups/--top: only report groups of at least N files
+              For --dupes/--top: only report groups of at least N files
               (default 2).
 
 THE REPORT
@@ -220,7 +221,7 @@ EXAMPLES
        Duplicate files rather than directories -- every digest shared by at
        least three files, then the ten most frequent checksums:
 
-       grouper --database db.sqlite --dups --min 3
+       grouper --database db.sqlite --dupes --min 3
        grouper --database db.sqlite --top 10
 
        Content-only grouping, so wholesale renames still match:

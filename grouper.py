@@ -30,7 +30,7 @@ Usage (pipeline order):
 
     grouper.py --database DB --ls DIR             # inspect one directory
     grouper.py --database DB --compare A B [--fn N]  # similarity of two dirs
-    grouper.py --database DB --dups [--min N]     # duplicate *files* report
+    grouper.py --database DB --dupes [--min N]    # duplicate *files* report
     grouper.py --database DB --top [N]            # the N (default 1) most
                                                   #   frequent checksums,
                                                   #   excluding empty files
@@ -1273,7 +1273,7 @@ def find_duplicate_groups(conn: sqlite3.Connection, min_count: int,
     if top_n is not None:
         limit = "LIMIT ?"
         params.append(top_n)
-    dup_keys = conn.execute(
+    dupe_keys = conn.execute(
         f"""
         SELECT algo, digest, COUNT(*) AS n
           FROM files
@@ -1286,7 +1286,7 @@ def find_duplicate_groups(conn: sqlite3.Connection, min_count: int,
         params,
     ).fetchall()
 
-    for key in dup_keys:
+    for key in dupe_keys:
         rows = conn.execute(
             """
             SELECT f.rel_path, f.inode, f.size, m.path AS mount
@@ -1300,9 +1300,9 @@ def find_duplicate_groups(conn: sqlite3.Connection, min_count: int,
         yield key["algo"], key["digest"], rows
 
 
-def report_dups(conn: sqlite3.Connection, min_count: int,
-                top_n: int | None = None,
-                exclude_empty: bool = False) -> None:
+def report_dupes(conn: sqlite3.Connection, min_count: int,
+                 top_n: int | None = None,
+                 exclude_empty: bool = False) -> None:
     groups = list(find_duplicate_groups(conn, min_count, top_n, exclude_empty))
     if not groups:
         print("no duplicate groups found")
@@ -1394,14 +1394,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compare", nargs=2, metavar=("DIR_A", "DIR_B"),
                         help="print the similarity (0.0-1.0) of two "
                              "directories' contents")
-    parser.add_argument("--dups", action="store_true",
+    parser.add_argument("--dupes", action="store_true",
                         help="report duplicate files (same digest)")
     parser.add_argument("--top", type=int, nargs="?", const=1, metavar="N",
                         help="report the N (default 1) most frequently "
                              "occurring checksums and their files, excluding "
                              "empty files")
     parser.add_argument("--min", type=int, default=2, metavar="N",
-                        help="--dups/--top: only groups of at least N files "
+                        help="--dupes/--top: only groups of at least N files "
                              "(default: 2)")
     args = parser.parse_args(argv)
 
@@ -1413,8 +1413,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--max-df must be 0 (exhaustive) or a positive cap")
     if not 0.0 <= args.min_sim <= 1.0:
         parser.error("--min-sim must be between 0.0 and 1.0")
-    if args.dups and args.top is not None:
-        parser.error("--dups and --top are mutually exclusive")
+    if args.dupes and args.top is not None:
+        parser.error("--dupes and --top are mutually exclusive")
     if args.top is not None and args.top < 1:
         parser.error("--top must be at least 1")
 
@@ -1444,11 +1444,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.compare is not None:
             return compare(conn, args.compare[0], args.compare[1],
                            args.fn or DEFAULT_FN)
-        if args.dups:
-            report_dups(conn, args.min)
+        if args.dupes:
+            report_dupes(conn, args.min)
             return 0
         if args.top is not None:
-            report_dups(conn, args.min, top_n=args.top, exclude_empty=True)
+            report_dupes(conn, args.min, top_n=args.top, exclude_empty=True)
             return 0
         if args.threshold is not None or not building:
             return report_groups(conn, sort=args.sort)
