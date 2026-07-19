@@ -9,6 +9,10 @@ The intent of storing this metadata in a file is severalfold:
 
 Sumtag on its own does not fulfill the *higher-level* intents, but makes them possible. It does carry one built-in primitive directly serving intent #1: `--verify` recomputes a file's checksum and compares it to the stored one, reporting disagreements (see Verification). That is a single-pass, single-file check — the cheap increment over machinery sumtag already has. Everything richer — finding duplicates, aggregate audit reporting, scheduled scrubs, quarantine, repair-from-replica — is left for more user-friendly apps built on top of the data and the `verify` primitive. In the unix way, this is standard: small programs that do one or just a few things and do them well. Sumtag computes and stores the data, and offers a basic verify; higher-level tools build audits from it.
 
+## Session start: fetch first
+
+Development happens on **two machines**, both syncing through the GitHub remote — there is no other shared state (in particular, Claude's per-machine memory does not sync). Before doing anything else in a session, run `git fetch origin` and compare the local branches against their remote counterparts. If any local branch has diverged from (not merely trails or leads) its remote — or if `origin/main` has commits the current branch's base lacks — report that to the user before starting work, so new work is never built on a stale view of `main`. Added 2026-07-19, after the two machines independently diagnosed and fixed the same `--progress` display bug (see BUGS.md) and the duplicate fixes had to be hand-reconciled in a rebase.
+
 ## What it does
 
 For each file in a directory tree, sumtag:
