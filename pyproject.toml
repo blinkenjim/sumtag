@@ -1,5 +1,6 @@
 # Packaging for sumtag. Build backend: setuptools (see CLAUDE.md).
-# The console_scripts entry point generates a `sumtag` command on PATH.
+# The console_scripts entry points generate the `sumtag`, `grouper`, and
+# `dedupe` commands on PATH.
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -15,8 +16,8 @@ dependencies = ["xxhash"]
 
 [project.scripts]
 sumtag = "sumtag.cli:main"
-grouper = "grouper:main"
+grouper = "sumtag.grouper:main"
+dedupe = "sumtag.dedupe:main"
 
 [tool.setuptools]
 packages = ["sumtag"]
-py-modules = ["grouper"]

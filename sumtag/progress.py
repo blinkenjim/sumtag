@@ -87,12 +87,31 @@ def _install_winch_handler() -> None:
         pass  # not in the main thread; keep the fallback width
 
 
-def _current_bar_width() -> int:
+def _current_line_width() -> int:
     global _line_width, _width_stale
     if _width_stale:
         _width_stale = False
         _line_width = _query_line_width()
-    return max(_line_width - _FIXED_WIDTH, 1)
+    return _line_width
+
+
+def _current_bar_width() -> int:
+    return max(_current_line_width() - _FIXED_WIDTH, 1)
+
+
+def _write_line(line: str) -> None:
+    """One in-place redraw, hard-clamped to the terminal width.
+
+    A line longer than the terminal wraps onto a second row, after which
+    ``\\r`` and EL only ever reach the continuation row -- the first row
+    (most of the bar) is stranded onscreen amid normal output. The
+    per-field budgets can't guarantee fit on their own: binary human_size
+    renders 9 characters for values in the 1000-1023.9 band of a unit,
+    overflowing the 8-wide size and 10-wide rate fields, and a terminal
+    narrower than the fixed widths overflows regardless of the fields.
+    """
+    sys.stderr.write("\r" + line[:_current_line_width()] + "\033[K")
+    sys.stderr.flush()
 
 _BINARY_UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
 _SI_UNITS = ("B", "kB", "MB", "GB", "TB", "PB")
@@ -113,7 +132,13 @@ def human_size(n: float, si: bool) -> str:
         idx += 1
     if idx == 0:
         return f"{int(value)}{units[idx]}"
-    return f"{value:.1f}{units[idx]}"
+    text = f"{value:.1f}"
+    if len(text) > len("999.9"):
+        # A four-digit mantissa (binary units cover 1000.0-1023.9 before
+        # promoting, e.g. a DVD VOB's 1023.8MiB) would overflow the fixed
+        # field widths and wrap the progress line; drop the decimal instead.
+        text = f"{value:.0f}"
+    return text + units[idx]
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -192,13 +217,82 @@ class Indicator:
             f"{frac * 100:>{_PCT_W}.0f}%  {elapsed_str:>{_ELAPSED_W}}  "
             f"ETA {eta_str:<{_ETA_W}}"
         )
-        sys.stderr.write("\r" + line + "\033[K")
-        sys.stderr.flush()
+        _write_line(line)
 
     def finish(self) -> None:
         if self._shown:
             sys.stderr.write("\r\033[K")
             sys.stderr.flush()
+
+
+class CountIndicator:
+    """A live items-done counter for a whole pass: ``nnn/mmm dirs [bar] …``.
+
+    Used by --prune-dirs, whose unit of work is directories checked, not
+    bytes read. Same conventions as Indicator: nothing renders until
+    THRESHOLD_SECONDS have elapsed, then a single stderr line redraws in
+    place. Call ``interrupt()`` before printing a normal output line so the
+    two never collide on screen (the bar redraws on the next update), and
+    ``finish()`` when the pass completes.
+    """
+
+    def __init__(self, total: int, unit: str = "dirs") -> None:
+        self._total = total
+        self._unit = unit
+        self._start = time.monotonic()
+        self._last_render = 0.0
+        self._shown = False
+        # nnn is zero-padded to mmm's width, matching --prescan's counter.
+        self._num_w = len(str(total)) if total else 1
+        self._fixed = (self._num_w * 2 + 1    # nnn/mmm
+                       + 1 + len(unit)        # " dirs"
+                       + 2 + 1 + 1            # "  [" "]"
+                       + 1 + _PCT_W + 1       # " nnn%"
+                       + 2 + _ELAPSED_W       # "  elapsed"
+                       + 2 + len("ETA ") + _ETA_W)
+
+    def __call__(self, done: int) -> None:
+        now = time.monotonic()
+        if not self._shown:
+            if now - self._start < THRESHOLD_SECONDS:
+                return
+            self._shown = True
+        elif now - self._last_render < _RENDER_INTERVAL:
+            return
+        self._last_render = now
+
+        elapsed = now - self._start
+        rate = done / elapsed if elapsed > 0 else 0.0
+        frac = (done / self._total) if self._total else 1.0
+        bar_w = max(_current_line_width() - self._fixed, 1)
+        eta = _format_eta((self._total - done) / rate) if rate > 0 else "--"
+        line = (
+            f"{done:0{self._num_w}d}/{self._total} {self._unit}  "
+            f"[{_render_bar(frac, bar_w)}] {frac * 100:>{_PCT_W}.0f}%  "
+            f"{_format_elapsed(elapsed):>{_ELAPSED_W}}  ETA {eta:<{_ETA_W}}"
+        )
+        _write_line(line)
+
+    def interrupt(self) -> None:
+        """Clear the line so a normal output line prints cleanly; the bar
+        reappears on the next update (threshold already passed)."""
+        if self._shown:
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
+
+    def finish(self) -> None:
+        if self._shown:
+            sys.stderr.write("\r\033[K")
+            sys.stderr.flush()
+
+
+def make_count(total: int, enabled: bool, unit: str = "dirs") -> Optional[CountIndicator]:
+    """Return a CountIndicator, or None if progress should not run --
+    the same suppression rules as :func:`make`."""
+    if not enabled or not sys.stderr.isatty():
+        return None
+    _install_winch_handler()
+    return CountIndicator(total, unit)
 
 
 def make(total: int, enabled: bool, si: bool = False) -> Optional[Indicator]:

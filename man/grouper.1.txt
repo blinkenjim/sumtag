@@ -123,6 +123,13 @@ OPTIONS
               kept, never what is looked at; it is recorded in the database,
               and a later --threshold below it is refused with a rerun hint.
 
+       --name For --pairs/--compare: two directories whose basenames differ
+              score 0, unconditionally -- only same-named directories can
+              pair, and therefore group. The typical prey is versioned copies
+              of one tree (proj/, backup/proj/, old/proj/), where the
+              directory's own name survives a copy even as contents drift.
+              Also sharply reduces what --pairs stores.
+
        --sort KEY
               Order for the report's groups. One of: bond (default) --
               creation order, strongest bonds first; files -- each group's
@@ -149,6 +156,14 @@ OPTIONS
        --min N
               For --dupes/--top: only report groups of at least N files
               (default 2).
+
+       --clean-db
+              Drop every grouper-owned derived table and VACUUM, returning
+              their space -- dir_pairs in particular can dwarf the sumtag
+              tables it was derived from. All-or-nothing on purpose: the
+              artifacts are interdependent, so a partial clean would leave a
+              grouping that cannot be reported. Sumtag's own tables are never
+              touched.  Cannot be combined with any other action.
 
 THE REPORT
        The report opens with the grouping's provenance (comparison function,
@@ -234,6 +249,15 @@ EXAMPLES
 
        grouper --database db.sqlite --no-junk-filter --prep --threshold 0.9
 
+       Prepare a very large corpus, keeping only meaningful pairs between
+       same-named directories:
+
+       grouper --database big.sqlite --prep --name --min-sim 0.4 --progress
+
+       Return the space the derived tables occupy:
+
+       grouper --database foo.sqlite --clean-db
+
 EXIT STATUS
        0 on success; 1 if an error prevented the request from being answered
        (not a sumtag database, no stored pairs or grouping yet, a --threshold
@@ -253,7 +277,7 @@ CAVEATS
        additionally want the stat metadata a --locate pass records.
 
 SEE ALSO
-       sumtag(1)
+       sumtag(1), dedupe(1)
 
 AUTHOR
        The sumtag authors.

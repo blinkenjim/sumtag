@@ -154,6 +154,20 @@ looked at; it is recorded in the database, and a later
 .B \-\-threshold
 below it is refused with a rerun hint.
 .TP
+.B \-\-name
+For
+.BR \-\-pairs / \-\-compare :
+two directories whose basenames differ score 0, unconditionally \(em only
+same-named directories can pair, and therefore group. The typical prey is
+versioned copies of one tree
+.RB ( proj /,
+.BR backup/proj /,
+.BR old/proj /),
+where the directory's own name survives a copy even as contents drift. Also
+sharply reduces what
+.B \-\-pairs
+stores.
+.TP
 .BI \-\-sort " KEY"
 Order for the report's groups. One of:
 .B bond
@@ -191,6 +205,16 @@ For
 only report groups of at least
 .I N
 files (default 2).
+.TP
+.B \-\-clean\-db
+Drop every grouper-owned derived table and
+.BR VACUUM ,
+returning their space \(em
+.B dir_pairs
+in particular can dwarf the sumtag tables it was derived from. All-or-nothing
+on purpose: the artifacts are interdependent, so a partial clean would leave
+a grouping that cannot be reported. Sumtag's own tables are never touched.
+Cannot be combined with any other action.
 .SH THE REPORT
 The report opens with the grouping's provenance (comparison function,
 threshold, build time), then prints each group with its member directories:
@@ -301,6 +325,19 @@ Rebuild everything with junk filtering off, to ask whether hidden trees
 .EX
 grouper \-\-database db.sqlite \-\-no\-junk\-filter \-\-prep \-\-threshold 0.9
 .EE
+.PP
+Prepare a very large corpus, keeping only meaningful pairs between
+same-named directories:
+.PP
+.EX
+grouper \-\-database big.sqlite \-\-prep \-\-name \-\-min\-sim 0.4 \-\-progress
+.EE
+.PP
+Return the space the derived tables occupy:
+.PP
+.EX
+grouper \-\-database foo.sqlite \-\-clean\-db
+.EE
 .SH EXIT STATUS
 .B 0
 on success;
@@ -331,6 +368,7 @@ byte totals in the report additionally want the stat metadata a
 .B \-\-locate
 pass records.
 .SH SEE ALSO
-.BR sumtag (1)
+.BR sumtag (1),
+.BR dedupe (1)
 .SH AUTHOR
 The sumtag authors.

@@ -62,6 +62,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remove", action="store_true",
                         help="remove the user.sumtag xattr from every file in "
                              "the tree (a testing/reset utility)")
+    parser.add_argument("--prune-dirs", dest="prune_dirs", action="store_true",
+                        help="check every directory the database knows under "
+                             "the given roots; delete the rows of directories "
+                             "that no longer exist. Requires --database; the "
+                             "filesystem is never modified. Exit 0/1/2 = "
+                             "nothing stale/pruned/errors")
+    parser.add_argument("--prune-all", dest="prune_all", action="store_true",
+                        help="like --prune-dirs, and additionally check every "
+                             "file row in directories that still exist, "
+                             "deleting the rows of files that no longer "
+                             "exist. Requires --database; the filesystem is "
+                             "never modified. Exit 0/1/2 = nothing "
+                             "stale/pruned/errors")
     parser.add_argument("--prescan", action="store_true",
                         help="scan the tree first to count files/bytes to be "
                              "checksummed, then prefix each announcement with "
@@ -90,9 +103,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Enforce the flag conflicts documented in CLAUDE.md / sumtag(1)."""
-    if not (args.sum or args.verify or args.remove or args.do_import or args.locate):
+    if not (args.sum or args.verify or args.remove or args.do_import
+            or args.locate or args.prune_dirs or args.prune_all):
         parser.error("an action is required: --sum, --verify, --remove, "
-                     "--import, or --locate")
+                     "--import, --locate, --prune-dirs, or --prune-all")
     if args.quiet and args.verbose:
         parser.error("-q/--quiet and -v/--verbose are mutually exclusive")
     if args.force and args.dry_run:
@@ -101,8 +115,10 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
         parser.error("--import requires --database")
     if args.locate and not args.database:
         parser.error("--locate requires --database")
-    if args.database and not (args.sum or args.do_import or args.locate):
-        parser.error("--database requires at least one of --sum, --import, --locate")
+    if args.database and not (args.sum or args.do_import or args.locate
+                              or args.prune_dirs or args.prune_all):
+        parser.error("--database requires at least one of --sum, --import, "
+                     "--locate, --prune-dirs, --prune-all")
     if args.verify:
         if args.database:
             parser.error("--verify cannot be combined with --database")
@@ -127,6 +143,30 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
             parser.error("--remove cannot be combined with --verify")
         if args.force:
             parser.error("--remove cannot be combined with --force")
+    if args.prune_dirs or args.prune_all:
+        # --prune-all subsumes --prune-dirs; giving both is redundant but
+        # not an error (the --locate-implies---import idiom).
+        prune = "--prune-all" if args.prune_all else "--prune-dirs"
+        if not args.database:
+            parser.error(f"{prune} requires --database "
+                         f"(it acts only on the database)")
+        for flag, given in (("--sum", args.sum), ("--import", args.do_import),
+                            ("--locate", args.locate),
+                            ("--verify", args.verify),
+                            ("--remove", args.remove)):
+            if given:
+                parser.error(f"{prune} cannot be combined with {flag} "
+                             f"(one run, one mode)")
+        if args.force:
+            parser.error(f"{prune} cannot be combined with --force "
+                         f"(there is no re-hash decision to override)")
+        if args.prescan or args.db_prescan:
+            parser.error(f"{prune} cannot be combined with "
+                         f"--prescan/--db-prescan (nothing is checksummed; "
+                         f"its own counter is built in)")
+        if args.exclude or args.no_ignore:
+            parser.error(f"{prune} walks the database, not the "
+                         f"filesystem; --exclude/--no-ignore do not apply")
     if args.prescan and args.remove:
         parser.error("--prescan cannot be combined with --remove "
                      "(--remove never computes anything to prescan)")
