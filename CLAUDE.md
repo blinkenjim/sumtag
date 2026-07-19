@@ -264,7 +264,7 @@ The database accumulates rows for files that have since been deleted — most ac
 
 ## Experimental companion programs
 
-Installed commands that ship inside the `sumtag` package (`sumtag/grouper.py`, `sumtag/dedupe.py`) with their own `console_scripts` entry points — `grouper` and `dedupe` on `PATH`, exactly like `sumtag` itself (promoted 2026-07-16; they began as repo-root scripts outside the package). *First-class to invoke, still experimental in status* — the promotion changed how they are typed, not their maturity. From a source checkout, `python3 -m sumtag.grouper` / `python3 -m sumtag.dedupe` are the development equivalents, same as `python3 -m sumtag`. They are the "higher-level tooling" playground CLAUDE.md keeps pointing at: they consume the sumtag database and never compute a hash (grouper additionally never touches xattrs or file contents; dedupe reads xattrs for its trust vetoes and deletes files — see its section). Experimental status does not exempt a program from being documented here.
+Installed commands that ship inside the `sumtag` package (`sumtag/grouper.py`, `sumtag/dedupe.py`, `sumtag/dbmerge.py`) with their own `console_scripts` entry points — `grouper`, `dedupe`, and `dbmerge` on `PATH`, exactly like `sumtag` itself (grouper/dedupe promoted 2026-07-16; they began as repo-root scripts outside the package; dbmerge added 2026-07-19 directly in the package). *First-class to invoke, still experimental in status* — the promotion changed how they are typed, not their maturity. From a source checkout, `python3 -m sumtag.grouper` / `python3 -m sumtag.dedupe` / `python3 -m sumtag.dbmerge` are the development equivalents, same as `python3 -m sumtag`. They are the "higher-level tooling" playground CLAUDE.md keeps pointing at: they consume the sumtag database and never compute a hash (grouper additionally never touches xattrs or file contents; dedupe reads xattrs for its trust vetoes and deletes files — see its section; dbmerge reads only databases and writes only its target database). Experimental status does not exempt a program from being documented here.
 
 ### grouper
 
@@ -309,6 +309,17 @@ Commits are incremental (per completed stripe), so an interrupted `--pairs` keep
 - **Offline prediction (`-n`/`--offline`, added 2026-07-17)**: answers "what *might* be deleted" from the database alone — no filesystem access, so neither root needs to be mounted (dedupe's `-n` is this flag, not a dry-run; the bare run is already the preview). Roots are resolved against the *stored* mountpoints (both rel forms `store._relativize` can emit are generated lexically — plain relpath, which for a firmlinked path is the escaping `../../../var/...` form stamping actually records, and the rooted rebase — with the database's own rows arbitrating which is real), the flat same-relative-directory match runs over the rows, and candidates print as `might delete` — deliberately not `would delete`, because everything the filesystem would have contributed is skipped: the three trust vetoes, the realpath/identity checks, fences, and all sweep/rmdir predictions (unstamped files are invisible, so the database can never know a directory would empty). Two row-only checks survive: the collision-insurance size comparison where `--locate` populated sizes on both sides (a recorded-size mismatch on a digest match is the same loud `MISMATCH`, exit 2), and a shared-recorded-inode note (hard link or alias — a live run decides which). The run is announced (`offline: predicting from database contents alone …` — approximation by consent, the `--db-prescan` idiom), the database opens read-only, the summary headline is `might delete:` (rows without sizes add `(+N of unknown size)` to the byte total), and `-n --delete` is a CLI error — a prediction cannot arm. The live bare preview remains the only exact one. The safety checks that survive offline: root disjointness (on the resolved mountpoint + rel-prefix identities), the no-rows-under-root refusal, and the mixed-algorithm refusal.
 - **Path discipline**: the walk and row lookups use `abspath` — exactly how sumtag records rel_paths — not `realpath`, or a symlinked path component (macOS's `/var` → `/private/var`) would silently match zero rows; pass the roots spelled as sumtag scanned them (a wrong spelling fails the no-rows check with a clear error). `realpath` is reserved for the safety checks. Exit codes are the house 0/1/2: nothing redundant / duplicates found (deleted or would-delete) / errors-or-refusal — plus 130 on Ctrl-C after printing the same summary a completed run prints (counters only count completed work; commits are per directory, so the database matches what actually happened).
 
+### dbmerge
+
+`dbmerge` (added 2026-07-19) combines per-volume sumtag databases into one: `dbmerge --database TARGET SOURCE...` folds each SOURCE (opened read-only, always) into TARGET, so cross-volume `dedupe`/`grouper` runs get the single database they consume — with zero changes to those tools, since the schema was always multi-volume (the `mountpoints` table exists precisely so one database can describe many filesystems; one-database-per-volume is an operational choice that buys parallel scanning, SQLite being single-writer). The intended workflow: per-volume databases stay the scanning targets, the merged database is a rebuildable analysis artifact, re-merged whenever the sources move on (after a rescan or `--prune-all`).
+
+- **Replace-per-mountpoint** (the load-bearing semantic, settled 2026-07-19): for each mountpoint present in a source, the target's existing rows for that mountpoint are deleted and the source's inserted fresh. A row-level upsert would never remove target rows whose source rows were pruned — ghosts forever; replacement makes the merge idempotent and each source authoritative for its mountpoints, including an empty one (a source mountpoint with zero rows still clears the target's — authoritative emptiness). Target mountpoints no source names are left untouched, so one volume can be re-merged without feeding all of them.
+- **The collision refusal is the corollary**: the same mountpoint path recorded in two sources is an error (`sources must partition by mountpoint`) — the second replacement would delete the first's just-merged rows. This doubles as the guard for the known limitation that a mount path is not a globally stable filesystem identity: two different filesystems recorded under one path are never silently interleaved.
+- **What never flows**: grouper's derived tables are not copied (`dir_files` references `files.rowid`, which the merge renumbers), and artifacts already in the target are **dropped** with an announcement — a merge that changed `files` has invalidated them (rerun `grouper --prep`; its `--clean-db` VACUUM is there if the space matters). The `prescan_summary` row is neither copied nor touched: it describes a filesystem walk, which the merge does not invalidate. Sources are never modified.
+- **Guards**, all before the target is opened for writing: every source must exist and carry the sumtag tables; the target may not also be a source, nor a source be given twice (checked under `realpath`); the mountpoint collision above; and a merged corpus spanning more than one `algo` (sources plus the target's surviving rows) is refused without `--allow-mixed` — the documented mixed-algorithm hazard.
+- **`-n`/`--dry-run`** previews everything (`would merge`/`would replace`/`would drop`, per-mountpoint row counts) with no side effects: the target is opened read-only if present and not created if absent. `--progress` shows **one aggregate bar across all sources** — rows-merged/rows-total via the house `CountIndicator` (unit `rows`; the denominator is a cheap up-front `COUNT(*)` per source), all the usual conventions (2-second threshold, stderr-tty only, cleared on completion).
+- **Commits are per mountpoint**, so an interrupted run keeps completed mountpoints, counters only count committed work, and Ctrl-C prints the normal summary and exits 130. Exit codes are the house 0/1/2 with one honest wrinkle: `1` (target modified — or would be, under `-n`) is the *normal* successful merge, because replacement always rewrites; `0` (nothing to do) occurs only for empty sources; `2` = errors or a refusal. The summary block is the house style: `merge:` (rows, mountpoints, sources headline — prints even at zero), `replace:`/`drop:` when nonzero, `database:`, `sources:`.
+
 ### query (planned)
 
 A companion query program has been discussed but no code exists in the repo yet; this heading is the placeholder so it gets documented the moment it lands.
@@ -344,12 +355,13 @@ sumtag/
   cli.py          # defines main()
   grouper.py      # companion program; `grouper` entry point (see Experimental companion programs)
   dedupe.py       # companion program; `dedupe` entry point (see Experimental companion programs)
+  dbmerge.py      # companion program; `dbmerge` entry point (see Experimental companion programs)
 pyproject.toml
 ```
 
 ### Entry point
 
-Packaging is **setuptools** via `pyproject.toml`, declaring `console_scripts` entry points. On install, pip generates launchers named `sumtag`, `grouper`, and `dedupe` on `PATH` (each with a shebang pointing at the install environment's interpreter):
+Packaging is **setuptools** via `pyproject.toml`, declaring `console_scripts` entry points. On install, pip generates launchers named `sumtag`, `grouper`, `dedupe`, and `dbmerge` on `PATH` (each with a shebang pointing at the install environment's interpreter):
 
 ```toml
 [build-system]
@@ -365,6 +377,7 @@ dependencies = ["xxhash"]
 sumtag = "sumtag.cli:main"
 grouper = "sumtag.grouper:main"
 dedupe = "sumtag.dedupe:main"
+dbmerge = "sumtag.dbmerge:main"
 ```
 
 **Both invocation paths funnel through the same `sumtag.cli:main`** — there is no behavioral drift between development and installed use:
@@ -384,10 +397,10 @@ dedupe = "sumtag.dedupe:main"
 
 ### Man pages
 
-Each installed command has a man page under `man/` — `sumtag.1`, `grouper.1`, `dedupe.1` (the latter two added 2026-07-16 with the commands' promotion) — and each page is kept in **three formats**, all committed:
+Each installed command has a man page under `man/` — `sumtag.1`, `grouper.1`, `dedupe.1` (added 2026-07-16 with the commands' promotion), `dbmerge.1` (added 2026-07-19) — and each page is kept in **three formats**, all committed:
 
 - **`.1`** — troff source, the source of truth. Edit this first for any CLI or behavior change.
-- **`.1.txt`** — plain-text rendering, regenerated with `MANWIDTH=80 man ./man/<page>.1 | col -b`. Caveat for `sumtag.1.txt` specifically: its original baseline predates that command and formats slightly differently (wrap points, bullet glyphs), so regenerate it wholesale only if the whole-file diff is acceptable — otherwise **hand-edit it to mirror the `.1` change** in its existing style, which is how it has been maintained so far. `grouper.1.txt` and `dedupe.1.txt` were generated by that exact command from the start, so wholesale regeneration is diff-stable for them.
+- **`.1.txt`** — plain-text rendering, regenerated with `MANWIDTH=80 man ./man/<page>.1 | col -b`. Caveat for `sumtag.1.txt` specifically: its original baseline predates that command and formats slightly differently (wrap points, bullet glyphs), so regenerate it wholesale only if the whole-file diff is acceptable — otherwise **hand-edit it to mirror the `.1` change** in its existing style, which is how it has been maintained so far. `grouper.1.txt`, `dedupe.1.txt`, and `dbmerge.1.txt` were generated by that exact command from the start, so wholesale regeneration is diff-stable for them.
 - **`.1.pdf`** — PDF rendering, regenerated wholesale each time the `.1` changes: `mandoc -T pdf man/<page>.1 > man/<page>.1.pdf` (kept per explicit user request, 2026-07-02).
 
 Whenever a `.1` file is edited, update its `.txt` and `.pdf` in the same change — the three formats are never allowed to drift.
@@ -432,7 +445,7 @@ At least one directory argument is required; there is no cwd default (decided 20
 | `--locate` | | bool | Stat every file visited and write the `os.stat()` metadata to the database, regardless of whether xattr work was done; implies `--import`. Requires `--database`. Useful as a periodic filesystem inventory pass (analogous to `updatedb`). |
 | `--si` | | bool | Display sizes and rates in `--progress` using decimal (SI, powers-of-1000: `kB`/`MB`/`GB`) units instead of the default binary (powers-of-1024: `KiB`/`MiB`/`GiB`) units. |
 | `--remove` | | bool | Remove the `user.sumtag` xattr from every file in the tree (see Removing stamps). A testing/reset utility, not a data-integrity primitive. Composes with `-n` to preview. |
-| `--prescan` | | bool | Walk the tree once before the real pass to count the files that will be checksummed and their total size, then prefix each hash/verify announcement with an nnn/mmm file counter and a bytes-so-far/total counter (see `--prescan` below). On a `--database` run (and not `-n`), also stores the totals as the database's one-row prescan summary (see `--db-prescan`). Cannot be combined with `--remove`. |
+| `--prescan` | | bool | Walk the tree once before the real pass to count the files that will be checksummed and their total size, then prefix each hash/verify announcement with an nnn/mmm file counter and a bytes-so-far/total counter, each followed by its percentage (see `--prescan` below). On a `--database` run (and not `-n`), also stores the totals as the database's one-row prescan summary (see `--db-prescan`). Cannot be combined with `--remove`. |
 | `--db-prescan` | | bool | Like `--prescan`, but load the counters' totals from the summary a previous `--prescan --database` run stored, instead of walking the filesystem — an approximate progress report bought without the extra walk (see `--db-prescan` below). Requires `--database`; cannot be combined with `--prescan` or `--remove`. |
 | `--prune-dirs` | | bool | Check every directory the database knows under the given roots; delete the rows of directories that no longer exist (see Pruning stale database rows). Requires `--database`; the filesystem is never modified. Exit `0`/`1`/`2` = nothing stale/pruned/errors. Composes with `-n` to preview and `--progress` for a live nnn/mmm counter. |
 | `--prune-all` | | bool | Like `--prune-dirs`, and additionally check every file row in directories that still exist (one `lstat` each), deleting the rows of files that no longer exist (see Pruning stale database rows). Same requirements, exit codes, and compositions as `--prune-dirs`; giving both is redundant but allowed. |
@@ -443,7 +456,7 @@ At least one directory argument is required; there is no cwd default (decided 20
 
 Sumtag's default (non-quiet) output is an *announcement*, not a completion report: for any file about to be checksummed, a line prints **before** the read begins. **Without `-v`, that line is the bare path and nothing else** — no verb, no reason, just the path, so `sumtag --sum` over a large tree stays clean and skimmable. **With `-v`**, the same announcement expands to the full form — `hash <path> (<reason>)` for a stamp, `verify <path>` for `--verify`, `import <path>` for a propagated import, `would hash <path> (<reason>)` under `--dry-run` — using present/imperative verbs, not past tense (`hash`/`import`, not `hashed`/`imported`). This bare-path/`-v` split applies uniformly to every routine per-file announcement (stamp, dry-run preview, import, and the no-usable-metadata report under `--import`/`--locate`); it does **not** apply to `--progress`, which is unaffected by `-v` and appears regardless, nor to the deviation lines below. The path being on screen before the read begins is also what makes `--progress` legible: it's already there by the time a slow file's live bar appears at the 2-second mark, rather than the bar being the first anyone hears of that file.
 
-With `--prescan`, the hash/`would hash`/`verify` announcement (bare-path or `-v` form alike) additionally gets an nnn/mmm and bytes-so-far/total counter prepended — see `--prescan` below. It does not touch `import`, `skip`, or the no-usable-metadata report; those aren't "the line before summing a file" in the first place.
+With `--prescan`, the hash/`would hash`/`verify` announcement (bare-path or `-v` form alike) additionally gets an nnn/mmm and bytes-so-far/total counter prepended, each with its parenthesized percentage — see `--prescan` below. It does not touch `import`, `skip`, or the no-usable-metadata report; those aren't "the line before summing a file" in the first place.
 
 A clean outcome earns no further line — silence means nothing bad happened. `--verify`'s successful case in particular prints nothing beyond its announcement (no `ok` line); the announcement already was the record. Only a *deviation* from clean earns a second line, and these are **unconditional — shown with their label regardless of `-v`**, since they are alarms, not the routine "why was this touched" detail that `-v` exists to add: `CORRUPT <path>` (mismatch), `stale <path> (modified since hash; restamp needed)` (legitimately edited, not corrupt — surfaced unconditionally, like `rsync` noting a file changed mid-transfer), `unverifiable <path>` (no usable xattr to check against; replaces the announcement outright since no read is even attempted), or an error via the normal error channel (`sumtag: <path>: <error>`; the file is skipped and the run continues).
 
@@ -509,19 +522,19 @@ Every field except the bar has a fixed width, so the bar absorbs whatever width 
 On a very large tree, the default output gives no sense of *how far along* a run is — files stream by with no indication of what fraction of the work is done. `--prescan` fixes that by walking the tree once, up front, purely to count: how many files the run will actually checksum, and their total size. The real pass then runs exactly as it always has, except each hash/verify announcement gains a counter prefix:
 
 ```
-nnn/mmm  bytes-so-far/bytes-total  <the usual announcement>
+nnn/mmm (pp%)  bytes-so-far/bytes-total (pp%)  <the usual announcement>
 ```
 
 Example (`-v`, mid-run):
 
 ```
-042/137  118.2MiB/4.2GiB  hash /backup/vault/photo0042.dng (file modified since last hash)
+042/137 ( 31%)  118.2MiB/4.2GiB (  3%)  hash /backup/vault/photo0042.dng (file modified since last hash)
 ```
 
 Or without `-v` (bare path, prefix still shown):
 
 ```
-042/137  118.2MiB/4.2GiB  /backup/vault/photo0042.dng
+042/137 ( 31%)  118.2MiB/4.2GiB (  3%)  /backup/vault/photo0042.dng
 ```
 
 - **nnn** is this file's ordinal position among the files being checksummed this run, zero-padded to the width of **mmm** (e.g. `007/137`, not `7/137`) so the column stays aligned as the count climbs.
@@ -529,6 +542,7 @@ Or without `-v` (bare path, prefix still shown):
 - **bytes-so-far** is the sum of the sizes of files *already completed* before this announcement (so it reads `0B` on the very first file) — not a live in-file counter like `--progress`; this line prints once per file, before that file's read begins.
 - **bytes-total** is the total size `--prescan` found up front.
 - Both byte figures are human-readable, honoring `--si` exactly like `--progress`'s size field.
+- **Each fraction is followed by its whole-number percentage in parens** (added 2026-07-19: every fraction shown to indicate progress carries one). The percentage is right-padded to three digits — `(  0%)` through `(100%)` — so the token keeps one width and the columns after it never jitter, the same fixed-width convention that keeps the `--progress` bar's own `pct` field from overflowing at 100%. Under `--db-prescan` drift `nnn` can overshoot `mmm` and the percentage can pass 100; that line simply widens by a character, harmless in an appended log (unlike a redrawn bar, nothing can be stranded).
 
 **What counts as "will be checksummed" mirrors whichever mode is running:**
 

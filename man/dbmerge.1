@@ -1,0 +1,171 @@
+.TH DBMERGE 1 "July 2026" "sumtag 0.1.0" "User Commands"
+.SH NAME
+dbmerge \- combine per-volume sumtag databases into one
+.SH SYNOPSIS
+.B dbmerge
+.BI \-\-database " TARGET"
+.RB [ \-n ", " \-\-dry\-run ]
+.RB [ \-\-progress ]
+.RB [ \-\-allow\-mixed ]
+.IR SOURCE ...
+.SH DESCRIPTION
+.B dbmerge
+folds any number of per-volume
+.BR sumtag (1)
+databases into one
+.IR TARGET ,
+so that cross-volume
+.BR dedupe (1)
+and
+.BR grouper (1)
+runs have the single database they consume. The sumtag schema was always
+multi-volume (the mountpoints table exists so one database can describe
+files across many filesystems); one database per volume is an operational
+choice that buys parallel scanning, SQLite being a single-writer store.
+.B dbmerge
+closes the loop: the per-volume databases stay the scanning targets, and
+the merged database is a rebuildable analysis artifact, re-merged whenever
+the sources move on (after a rescan, or after
+.B sumtag \-\-prune\-all
+reconciles a source).
+.PP
+Each
+.I SOURCE
+is opened read-only, always, and is never modified. It is an experimental
+companion to
+.BR sumtag (1)
+and never computes a checksum: only the mountpoints and files tables flow,
+always from source to target.
+.SH REPLACE PER MOUNTPOINT
+For each mountpoint present in a source, the target's existing rows for
+that mountpoint are deleted and the source's rows inserted fresh. A
+row-level upsert would carry updates over but never remove target rows
+whose source rows were pruned \(em the merged database would accumulate
+ghost rows forever. Replacement makes the merge idempotent and each source
+authoritative for its own mountpoints, including an empty one: a source
+mountpoint with zero rows still clears the target's rows for it. Target
+mountpoints no source mentions are left untouched, so one volume can be
+re-merged without feeding all of them.
+.PP
+The corollary is the collision refusal: the same mountpoint path recorded
+in two sources is an error, because the second source's replacement would
+delete the first's just-merged rows. Sources must partition by mountpoint
+\(em exactly what one database per volume produces. This doubles as the
+guard against silently interleaving two different filesystems recorded
+under one mount path.
+.SH WHAT IS NEVER COPIED
+.BR grouper (1)'s
+derived tables (dirs, dir_files, dir_pairs, groups, group_dirs,
+grouper_meta) are never copied \(em dir_files references files.rowid,
+which the merge renumbers \(em and any such artifacts already in the
+target are dropped, with an announcement: a merge that changed the files
+table has invalidated them. Rerun
+.B grouper \-\-prep
+on the merged database;
+.B grouper \-\-clean\-db
+reclaims the space if it matters. The prescan_summary row is neither
+copied nor touched: it describes a filesystem walk, which the merge does
+not invalidate.
+.SH SAFETY CHECKS
+All before the target is opened for writing:
+.IP \(bu 3
+every source must exist and carry the sumtag tables;
+.IP \(bu 3
+the target may not also be a source, and no source may be given twice
+(checked after realpath resolution, so symbolic links cannot disguise
+an overlap);
+.IP \(bu 3
+the same mountpoint path in two sources is refused (see above);
+.IP \(bu 3
+a merged corpus spanning more than one digest algorithm \(em across the
+sources plus whatever target rows survive the merge \(em is refused
+without
+.BR \-\-allow\-mixed :
+digests only compare within one algorithm, so cross-algorithm duplicates
+silently fail to match.
+.SH OPTIONS
+.TP
+.BI \-\-database " TARGET"
+The merged database to write. Created if missing (but not under
+.BR \-\-dry\-run ).
+Existing mountpoints not named by any source are left untouched.
+Required.
+.TP
+.BR \-n ", " \-\-dry\-run
+Report what would be merged \(em per-mountpoint
+.B would merge
+lines with row counts,
+.BR "would replace" ,
+.B would drop
+\(em without writing anything. The target is opened read-only if it
+exists and is not created if it does not.
+.TP
+.B \-\-progress
+Show one aggregate progress bar on stderr covering all sources:
+rows-merged/rows-total with rate, percent, elapsed, and ETA. The
+denominator is counted up front (one cheap COUNT per source). Follows
+sumtag's conventions: opt-in, appears once the run has taken 2 seconds,
+redrawn in place, cleared on completion, suppressed when stderr is not a
+terminal.
+.TP
+.B \-\-allow\-mixed
+Proceed even when the merged corpus would span more than one digest
+algorithm.
+.SH OUTPUT
+One announcement per mountpoint before its rows stream across
+.RB ( "merge " path
+.RI ( N " rows from " SOURCE )),
+then the house summary block:
+.B merge:
+(rows, mountpoints, sources \(em the headline prints even at zero),
+.B replace:
+and
+.B drop:
+when nonzero, then
+.B database:
+and
+.BR sources: .
+Under
+.B \-\-dry\-run
+every verb gains
+.BR would .
+.SH EXIT STATUS
+.TP
+.B 0
+Nothing to do: no rows merged, none replaced. In practice only empty
+sources, since replacement always rewrites.
+.TP
+.B 1
+The target was (or, under
+.BR \-\-dry\-run ,
+would be) modified \(em the normal successful merge.
+.TP
+.B 2
+Errors, or a safety refusal.
+.TP
+.B 130
+Interrupted (Ctrl-C). Commits are per mountpoint, so an interrupted run
+keeps the mountpoints it completed; the summary printed reflects only
+committed work.
+.SH EXAMPLES
+Merge three per-volume databases into one analysis database:
+.PP
+.EX
+dbmerge \-\-database merged.sqlite tank1.sqlite tank2.sqlite tank3.sqlite
+.EE
+.PP
+Preview a re-merge of one volume after it was rescanned:
+.PP
+.EX
+dbmerge \-\-database merged.sqlite \-n tank1.sqlite
+.EE
+.PP
+Merge a whole shelf of enclosures with a progress bar:
+.PP
+.EX
+dbmerge \-\-database merged.sqlite \-\-progress tank*.sqlite
+.EE
+.SH SEE ALSO
+.BR sumtag (1),
+.BR grouper (1),
+.BR dedupe (1)
