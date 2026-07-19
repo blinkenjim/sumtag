@@ -264,7 +264,7 @@ The database accumulates rows for files that have since been deleted — most ac
 
 ## Experimental companion programs
 
-Installed commands that ship inside the `sumtag` package (`sumtag/grouper.py`, `sumtag/dedupe.py`) with their own `console_scripts` entry points — `grouper` and `dedupe` on `PATH`, exactly like `sumtag` itself (promoted 2026-07-16; they began as repo-root scripts outside the package). *First-class to invoke, still experimental in status* — the promotion changed how they are typed, not their maturity. From a source checkout, `python3 -m sumtag.grouper` / `python3 -m sumtag.dedupe` are the development equivalents, same as `python3 -m sumtag`. They are the "higher-level tooling" playground CLAUDE.md keeps pointing at: they consume the sumtag database and never compute a hash (grouper additionally never touches xattrs or file contents; dedupe reads xattrs for its trust vetoes and deletes files — see its section). Experimental status does not exempt a program from being documented here.
+Installed commands that ship inside the `sumtag` package (`sumtag/grouper.py`, `sumtag/dedupe.py`, `sumtag/dbmerge.py`) with their own `console_scripts` entry points — `grouper`, `dedupe`, and `dbmerge` on `PATH`, exactly like `sumtag` itself (grouper/dedupe promoted 2026-07-16; they began as repo-root scripts outside the package; dbmerge added 2026-07-19 directly in the package). *First-class to invoke, still experimental in status* — the promotion changed how they are typed, not their maturity. From a source checkout, `python3 -m sumtag.grouper` / `python3 -m sumtag.dedupe` / `python3 -m sumtag.dbmerge` are the development equivalents, same as `python3 -m sumtag`. They are the "higher-level tooling" playground CLAUDE.md keeps pointing at: they consume the sumtag database and never compute a hash (grouper additionally never touches xattrs or file contents; dedupe reads xattrs for its trust vetoes and deletes files — see its section; dbmerge reads only databases and writes only its target database). Experimental status does not exempt a program from being documented here.
 
 ### grouper
 
@@ -307,6 +307,17 @@ Commits are incremental (per completed stripe), so an interrupted `--pairs` keep
 - **Offline prediction (`-n`/`--offline`, added 2026-07-17)**: answers "what *might* be deleted" from the database alone — no filesystem access, so neither root needs to be mounted (dedupe's `-n` is this flag, not a dry-run; the bare run is already the preview). Roots are resolved against the *stored* mountpoints (both rel forms `store._relativize` can emit are generated lexically — plain relpath, which for a firmlinked path is the escaping `../../../var/...` form stamping actually records, and the rooted rebase — with the database's own rows arbitrating which is real), the flat same-relative-directory match runs over the rows, and candidates print as `might delete` — deliberately not `would delete`, because everything the filesystem would have contributed is skipped: the three trust vetoes, the realpath/identity checks, fences, and all sweep/rmdir predictions (unstamped files are invisible, so the database can never know a directory would empty). Two row-only checks survive: the collision-insurance size comparison where `--locate` populated sizes on both sides (a recorded-size mismatch on a digest match is the same loud `MISMATCH`, exit 2), and a shared-recorded-inode note (hard link or alias — a live run decides which). The run is announced (`offline: predicting from database contents alone …` — approximation by consent, the `--db-prescan` idiom), the database opens read-only, the summary headline is `might delete:` (rows without sizes add `(+N of unknown size)` to the byte total), and `-n --delete` is a CLI error — a prediction cannot arm. The live bare preview remains the only exact one. The safety checks that survive offline: root disjointness (on the resolved mountpoint + rel-prefix identities), the no-rows-under-root refusal, and the mixed-algorithm refusal.
 - **Path discipline**: the walk and row lookups use `abspath` — exactly how sumtag records rel_paths — not `realpath`, or a symlinked path component (macOS's `/var` → `/private/var`) would silently match zero rows; pass the roots spelled as sumtag scanned them (a wrong spelling fails the no-rows check with a clear error). `realpath` is reserved for the safety checks. Exit codes are the house 0/1/2: nothing redundant / duplicates found (deleted or would-delete) / errors-or-refusal — plus 130 on Ctrl-C after printing the same summary a completed run prints (counters only count completed work; commits are per directory, so the database matches what actually happened).
 
+### dbmerge
+
+`dbmerge` (added 2026-07-19) combines per-volume sumtag databases into one: `dbmerge --database TARGET SOURCE...` folds each SOURCE (opened read-only, always) into TARGET, so cross-volume `dedupe`/`grouper` runs get the single database they consume — with zero changes to those tools, since the schema was always multi-volume (the `mountpoints` table exists precisely so one database can describe many filesystems; one-database-per-volume is an operational choice that buys parallel scanning, SQLite being single-writer). The intended workflow: per-volume databases stay the scanning targets, the merged database is a rebuildable analysis artifact, re-merged whenever the sources move on (after a rescan or `--prune-all`).
+
+- **Replace-per-mountpoint** (the load-bearing semantic, settled 2026-07-19): for each mountpoint present in a source, the target's existing rows for that mountpoint are deleted and the source's inserted fresh. A row-level upsert would never remove target rows whose source rows were pruned — ghosts forever; replacement makes the merge idempotent and each source authoritative for its mountpoints, including an empty one (a source mountpoint with zero rows still clears the target's — authoritative emptiness). Target mountpoints no source names are left untouched, so one volume can be re-merged without feeding all of them.
+- **The collision refusal is the corollary**: the same mountpoint path recorded in two sources is an error (`sources must partition by mountpoint`) — the second replacement would delete the first's just-merged rows. This doubles as the guard for the known limitation that a mount path is not a globally stable filesystem identity: two different filesystems recorded under one path are never silently interleaved.
+- **What never flows**: grouper's derived tables are not copied (`dir_files` references `files.rowid`, which the merge renumbers), and artifacts already in the target are **dropped** with an announcement — a merge that changed `files` has invalidated them (rerun `grouper --prep`; its `--clean-db` VACUUM is there if the space matters). The `prescan_summary` row is neither copied nor touched: it describes a filesystem walk, which the merge does not invalidate. Sources are never modified.
+- **Guards**, all before the target is opened for writing: every source must exist and carry the sumtag tables; the target may not also be a source, nor a source be given twice (checked under `realpath`); the mountpoint collision above; and a merged corpus spanning more than one `algo` (sources plus the target's surviving rows) is refused without `--allow-mixed` — the documented mixed-algorithm hazard.
+- **`-n`/`--dry-run`** previews everything (`would merge`/`would replace`/`would drop`, per-mountpoint row counts) with no side effects: the target is opened read-only if present and not created if absent. `--progress` shows **one aggregate bar across all sources** — rows-merged/rows-total via the house `CountIndicator` (unit `rows`; the denominator is a cheap up-front `COUNT(*)` per source), all the usual conventions (2-second threshold, stderr-tty only, cleared on completion).
+- **Commits are per mountpoint**, so an interrupted run keeps completed mountpoints, counters only count committed work, and Ctrl-C prints the normal summary and exits 130. Exit codes are the house 0/1/2 with one honest wrinkle: `1` (target modified — or would be, under `-n`) is the *normal* successful merge, because replacement always rewrites; `0` (nothing to do) occurs only for empty sources; `2` = errors or a refusal. The summary block is the house style: `merge:` (rows, mountpoints, sources headline — prints even at zero), `replace:`/`drop:` when nonzero, `database:`, `sources:`.
+
 ### query (planned)
 
 A companion query program has been discussed but no code exists in the repo yet; this heading is the placeholder so it gets documented the moment it lands.
@@ -342,12 +353,13 @@ sumtag/
   cli.py          # defines main()
   grouper.py      # companion program; `grouper` entry point (see Experimental companion programs)
   dedupe.py       # companion program; `dedupe` entry point (see Experimental companion programs)
+  dbmerge.py      # companion program; `dbmerge` entry point (see Experimental companion programs)
 pyproject.toml
 ```
 
 ### Entry point
 
-Packaging is **setuptools** via `pyproject.toml`, declaring `console_scripts` entry points. On install, pip generates launchers named `sumtag`, `grouper`, and `dedupe` on `PATH` (each with a shebang pointing at the install environment's interpreter):
+Packaging is **setuptools** via `pyproject.toml`, declaring `console_scripts` entry points. On install, pip generates launchers named `sumtag`, `grouper`, `dedupe`, and `dbmerge` on `PATH` (each with a shebang pointing at the install environment's interpreter):
 
 ```toml
 [build-system]
@@ -363,6 +375,7 @@ dependencies = ["xxhash"]
 sumtag = "sumtag.cli:main"
 grouper = "sumtag.grouper:main"
 dedupe = "sumtag.dedupe:main"
+dbmerge = "sumtag.dbmerge:main"
 ```
 
 **Both invocation paths funnel through the same `sumtag.cli:main`** — there is no behavioral drift between development and installed use:
@@ -382,10 +395,10 @@ dedupe = "sumtag.dedupe:main"
 
 ### Man pages
 
-Each installed command has a man page under `man/` — `sumtag.1`, `grouper.1`, `dedupe.1` (the latter two added 2026-07-16 with the commands' promotion) — and each page is kept in **three formats**, all committed:
+Each installed command has a man page under `man/` — `sumtag.1`, `grouper.1`, `dedupe.1` (added 2026-07-16 with the commands' promotion), `dbmerge.1` (added 2026-07-19) — and each page is kept in **three formats**, all committed:
 
 - **`.1`** — troff source, the source of truth. Edit this first for any CLI or behavior change.
-- **`.1.txt`** — plain-text rendering, regenerated with `MANWIDTH=80 man ./man/<page>.1 | col -b`. Caveat for `sumtag.1.txt` specifically: its original baseline predates that command and formats slightly differently (wrap points, bullet glyphs), so regenerate it wholesale only if the whole-file diff is acceptable — otherwise **hand-edit it to mirror the `.1` change** in its existing style, which is how it has been maintained so far. `grouper.1.txt` and `dedupe.1.txt` were generated by that exact command from the start, so wholesale regeneration is diff-stable for them.
+- **`.1.txt`** — plain-text rendering, regenerated with `MANWIDTH=80 man ./man/<page>.1 | col -b`. Caveat for `sumtag.1.txt` specifically: its original baseline predates that command and formats slightly differently (wrap points, bullet glyphs), so regenerate it wholesale only if the whole-file diff is acceptable — otherwise **hand-edit it to mirror the `.1` change** in its existing style, which is how it has been maintained so far. `grouper.1.txt`, `dedupe.1.txt`, and `dbmerge.1.txt` were generated by that exact command from the start, so wholesale regeneration is diff-stable for them.
 - **`.1.pdf`** — PDF rendering, regenerated wholesale each time the `.1` changes: `mandoc -T pdf man/<page>.1 > man/<page>.1.pdf` (kept per explicit user request, 2026-07-02).
 
 Whenever a `.1` file is edited, update its `.txt` and `.pdf` in the same change — the three formats are never allowed to drift.
