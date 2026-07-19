@@ -50,7 +50,11 @@ expensive part, so the similarity threshold is deliberately not applied here
 Stage 3: walk the stored pairs best-first and partition directories into
 groups, taking
 .I X
-(0.0\-1.0) as the similar-enough bar. Each directory gets exactly one
+(0.0\-1.0) as the similar-enough bar. Pairs of equal similarity are walked
+in order of the number of files they share (stored with each pair at
+.B \-\-pairs
+time), so at the same score two big matching archives seed a group ahead
+of two matching three-file folders. Each directory gets exactly one
 placement decision and groups never merge, so the result is a true partition.
 The grouping is persisted, and the run ends with the report. If the stored
 grouping is already current for this threshold, the rebuild is skipped.
