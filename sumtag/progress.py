@@ -132,7 +132,13 @@ def human_size(n: float, si: bool) -> str:
         idx += 1
     if idx == 0:
         return f"{int(value)}{units[idx]}"
-    return f"{value:.1f}{units[idx]}"
+    text = f"{value:.1f}"
+    if len(text) > len("999.9"):
+        # A four-digit mantissa (binary units cover 1000.0-1023.9 before
+        # promoting, e.g. a DVD VOB's 1023.8MiB) would overflow the fixed
+        # field widths and wrap the progress line; drop the decimal instead.
+        text = f"{value:.0f}"
+    return text + units[idx]
 
 
 def _format_elapsed(seconds: float) -> str:
