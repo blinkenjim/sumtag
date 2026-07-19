@@ -430,7 +430,7 @@ At least one directory argument is required; there is no cwd default (decided 20
 | `--locate` | | bool | Stat every file visited and write the `os.stat()` metadata to the database, regardless of whether xattr work was done; implies `--import`. Requires `--database`. Useful as a periodic filesystem inventory pass (analogous to `updatedb`). |
 | `--si` | | bool | Display sizes and rates in `--progress` using decimal (SI, powers-of-1000: `kB`/`MB`/`GB`) units instead of the default binary (powers-of-1024: `KiB`/`MiB`/`GiB`) units. |
 | `--remove` | | bool | Remove the `user.sumtag` xattr from every file in the tree (see Removing stamps). A testing/reset utility, not a data-integrity primitive. Composes with `-n` to preview. |
-| `--prescan` | | bool | Walk the tree once before the real pass to count the files that will be checksummed and their total size, then prefix each hash/verify announcement with an nnn/mmm file counter and a bytes-so-far/total counter (see `--prescan` below). On a `--database` run (and not `-n`), also stores the totals as the database's one-row prescan summary (see `--db-prescan`). Cannot be combined with `--remove`. |
+| `--prescan` | | bool | Walk the tree once before the real pass to count the files that will be checksummed and their total size, then prefix each hash/verify announcement with an nnn/mmm file counter and a bytes-so-far/total counter, each followed by its percentage (see `--prescan` below). On a `--database` run (and not `-n`), also stores the totals as the database's one-row prescan summary (see `--db-prescan`). Cannot be combined with `--remove`. |
 | `--db-prescan` | | bool | Like `--prescan`, but load the counters' totals from the summary a previous `--prescan --database` run stored, instead of walking the filesystem — an approximate progress report bought without the extra walk (see `--db-prescan` below). Requires `--database`; cannot be combined with `--prescan` or `--remove`. |
 | `--prune-dirs` | | bool | Check every directory the database knows under the given roots; delete the rows of directories that no longer exist (see Pruning stale database rows). Requires `--database`; the filesystem is never modified. Exit `0`/`1`/`2` = nothing stale/pruned/errors. Composes with `-n` to preview and `--progress` for a live nnn/mmm counter. |
 | `--prune-all` | | bool | Like `--prune-dirs`, and additionally check every file row in directories that still exist (one `lstat` each), deleting the rows of files that no longer exist (see Pruning stale database rows). Same requirements, exit codes, and compositions as `--prune-dirs`; giving both is redundant but allowed. |
@@ -441,7 +441,7 @@ At least one directory argument is required; there is no cwd default (decided 20
 
 Sumtag's default (non-quiet) output is an *announcement*, not a completion report: for any file about to be checksummed, a line prints **before** the read begins. **Without `-v`, that line is the bare path and nothing else** — no verb, no reason, just the path, so `sumtag --sum` over a large tree stays clean and skimmable. **With `-v`**, the same announcement expands to the full form — `hash <path> (<reason>)` for a stamp, `verify <path>` for `--verify`, `import <path>` for a propagated import, `would hash <path> (<reason>)` under `--dry-run` — using present/imperative verbs, not past tense (`hash`/`import`, not `hashed`/`imported`). This bare-path/`-v` split applies uniformly to every routine per-file announcement (stamp, dry-run preview, import, and the no-usable-metadata report under `--import`/`--locate`); it does **not** apply to `--progress`, which is unaffected by `-v` and appears regardless, nor to the deviation lines below. The path being on screen before the read begins is also what makes `--progress` legible: it's already there by the time a slow file's live bar appears at the 2-second mark, rather than the bar being the first anyone hears of that file.
 
-With `--prescan`, the hash/`would hash`/`verify` announcement (bare-path or `-v` form alike) additionally gets an nnn/mmm and bytes-so-far/total counter prepended — see `--prescan` below. It does not touch `import`, `skip`, or the no-usable-metadata report; those aren't "the line before summing a file" in the first place.
+With `--prescan`, the hash/`would hash`/`verify` announcement (bare-path or `-v` form alike) additionally gets an nnn/mmm and bytes-so-far/total counter prepended, each with its parenthesized percentage — see `--prescan` below. It does not touch `import`, `skip`, or the no-usable-metadata report; those aren't "the line before summing a file" in the first place.
 
 A clean outcome earns no further line — silence means nothing bad happened. `--verify`'s successful case in particular prints nothing beyond its announcement (no `ok` line); the announcement already was the record. Only a *deviation* from clean earns a second line, and these are **unconditional — shown with their label regardless of `-v`**, since they are alarms, not the routine "why was this touched" detail that `-v` exists to add: `CORRUPT <path>` (mismatch), `stale <path> (modified since hash; restamp needed)` (legitimately edited, not corrupt — surfaced unconditionally, like `rsync` noting a file changed mid-transfer), `unverifiable <path>` (no usable xattr to check against; replaces the announcement outright since no read is even attempted), or an error via the normal error channel (`sumtag: <path>: <error>`; the file is skipped and the run continues).
 
@@ -507,19 +507,19 @@ Every field except the bar has a fixed width, so the bar absorbs whatever width 
 On a very large tree, the default output gives no sense of *how far along* a run is — files stream by with no indication of what fraction of the work is done. `--prescan` fixes that by walking the tree once, up front, purely to count: how many files the run will actually checksum, and their total size. The real pass then runs exactly as it always has, except each hash/verify announcement gains a counter prefix:
 
 ```
-nnn/mmm  bytes-so-far/bytes-total  <the usual announcement>
+nnn/mmm (pp%)  bytes-so-far/bytes-total (pp%)  <the usual announcement>
 ```
 
 Example (`-v`, mid-run):
 
 ```
-042/137  118.2MiB/4.2GiB  hash /backup/vault/photo0042.dng (file modified since last hash)
+042/137 ( 31%)  118.2MiB/4.2GiB (  3%)  hash /backup/vault/photo0042.dng (file modified since last hash)
 ```
 
 Or without `-v` (bare path, prefix still shown):
 
 ```
-042/137  118.2MiB/4.2GiB  /backup/vault/photo0042.dng
+042/137 ( 31%)  118.2MiB/4.2GiB (  3%)  /backup/vault/photo0042.dng
 ```
 
 - **nnn** is this file's ordinal position among the files being checksummed this run, zero-padded to the width of **mmm** (e.g. `007/137`, not `7/137`) so the column stays aligned as the count climbs.
@@ -527,6 +527,7 @@ Or without `-v` (bare path, prefix still shown):
 - **bytes-so-far** is the sum of the sizes of files *already completed* before this announcement (so it reads `0B` on the very first file) — not a live in-file counter like `--progress`; this line prints once per file, before that file's read begins.
 - **bytes-total** is the total size `--prescan` found up front.
 - Both byte figures are human-readable, honoring `--si` exactly like `--progress`'s size field.
+- **Each fraction is followed by its whole-number percentage in parens** (added 2026-07-19: every fraction shown to indicate progress carries one). The percentage is right-padded to three digits — `(  0%)` through `(100%)` — so the token keeps one width and the columns after it never jitter, the same fixed-width convention that keeps the `--progress` bar's own `pct` field from overflowing at 100%. Under `--db-prescan` drift `nnn` can overshoot `mmm` and the percentage can pass 100; that line simply widens by a character, harmless in an appended log (unlike a redrawn bar, nothing can be stranded).
 
 **What counts as "will be checksummed" mirrors whichever mode is running:**
 

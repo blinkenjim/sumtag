@@ -359,13 +359,29 @@ def _prescan_verify(roots, args, rep: _Reporter) -> tuple[int, int]:
     return count, total_bytes
 
 
+def _pct(done: float, total: float) -> str:
+    """A progress fraction's whole-number percentage, parenthesized.
+
+    Follows every fraction shown to indicate progress (requested
+    2026-07-19). A zero total reads as complete, matching progress.py's
+    bar convention. Right-padded to three digits so the token keeps one
+    width from (  0%) through (100%) and the columns after it never
+    jitter -- the same fixed-width convention as the bar's pct field.
+    (--db-prescan drift can push past 100%; that line simply widens,
+    harmless in an appended log.)
+    """
+    frac = (done / total) if total else 1.0
+    return f"({frac * 100:>3.0f}%)"
+
+
 def _prescan_prefix(index: int, total_count: int, bytes_so_far: int,
                     total_bytes: int, si: bool) -> str:
-    """Render --prescan's "nnn/mmm  so-far/total  " counter prefix."""
+    """Render --prescan's "nnn/mmm (pp%)  so-far/total (pp%)  " prefix."""
     width = len(str(total_count)) if total_count else 1
     so_far_h = progress_mod.human_size(bytes_so_far, si)
     total_h = progress_mod.human_size(total_bytes, si)
-    return f"{index:0{width}d}/{total_count}  {so_far_h}/{total_h}  "
+    return (f"{index:0{width}d}/{total_count} {_pct(index, total_count)}  "
+            f"{so_far_h}/{total_h} {_pct(bytes_so_far, total_bytes)}  ")
 
 
 def _mirror(store, path: str, meta: dict, inode: int,

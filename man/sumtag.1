@@ -225,10 +225,12 @@ be combined with
 Walk the tree once up front to count the files that will be checksummed and
 their total size, then prefix each hash/verify announcement with an
 .IR nnn / mmm
-file counter and a bytes-so-far/total counter, e.g.:
+file counter and a bytes-so-far/total counter, each followed by its
+whole-number percentage in parens (right-padded to three digits so the
+columns never jitter), e.g.:
 .RS
 .EX
-042/137  118.2MiB/4.2GiB  hash /backup/vault/photo0042.dng (reason)
+042/137 ( 31%)  118.2MiB/4.2GiB (  3%)  hash /backup/vault/photo0042.dng (reason)
 .EE
 .RE
 The counted set mirrors whichever mode is running: for the normal hash/stamp
