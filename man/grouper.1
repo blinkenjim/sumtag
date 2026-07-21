@@ -224,7 +224,7 @@ The report opens with the grouping's provenance (comparison function,
 threshold, build time), then prints each group with its member directories:
 .PP
 .EX
-group 17  (2 directories, 1852 files, 908.4GiB in tree, best pair 1.000)
+group 17  (2 directories, 1852 files, 908.4GiB in tree, avg 454.2GiB/dir, best pair 1.000)
     /mnt/backup/recovered/media
     /mnt/backup/master/media
 .EE
@@ -240,8 +240,10 @@ not change. The default
 .B bond
 order lists groups in creation order, strongest bonds first. The
 .BR files ", " size ", and " tree\-size
-orders list the largest groups first and add each group's file count and
-byte total to its header line.
+orders list the largest groups first and add each group's file count,
+byte total, and average bytes per member directory
+.RB ( "avg \&...\&/dir" ,
+the byte total divided by the member count) to its header line.
 .B size
 counts the member directories' direct children \(em the same files the
 similarity was scored over \(em while

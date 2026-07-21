@@ -171,7 +171,7 @@ THE REPORT
        threshold, build time), then prints each group with its member
        directories:
 
-       group 17  (2 directories, 1852 files, 908.4GiB in tree, best pair 1.000)
+       group 17  (2 directories, 1852 files, 908.4GiB in tree, avg 454.2GiB/dir, best pair 1.000)
 	   /mnt/backup/recovered/media
 	   /mnt/backup/master/media
 
@@ -182,15 +182,17 @@ THE REPORT
        --sort is display-time only: nothing is stored or rebuilt, and group
        numbering does not change. The default bond order lists groups in
        creation order, strongest bonds first. The files, size, and tree-size
-       orders list the largest groups first and add each group's file count and
-       byte total to its header line.  size counts the member directories'
-       direct children — the same files the similarity was scored over — while
-       tree-size rolls up each member's entire subtree (marked in tree in the
-       header): members nested under another member of the same group are
-       skipped so nothing is double-counted, and the totals include stamped
-       files the index itself never looked at (hidden files, dropped junk
-       directories).  Under tree-size, the same bytes can legitimately appear in
-       several groups' totals, so report-wide sums are not meaningful.
+       orders list the largest groups first and add each group's file count,
+       byte total, and average bytes per member directory (avg .../dir, the byte
+       total divided by the member count) to its header line.  size counts the
+       member directories' direct children — the same files the similarity was
+       scored over — while tree-size rolls up each member's entire subtree
+       (marked in tree in the header): members nested under another member of
+       the same group are skipped so nothing is double-counted, and the totals
+       include stamped files the index itself never looked at (hidden files,
+       dropped junk directories).  Under tree-size, the same bytes can
+       legitimately appear in several groups' totals, so report-wide sums are
+       not meaningful.
 
        Byte totals read the size column that a sumtag --locate run populates. If
        some files lack sizes, the report proceeds with a note on standard error

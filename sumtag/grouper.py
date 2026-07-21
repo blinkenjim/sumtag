@@ -1223,7 +1223,12 @@ def report_groups(conn: sqlite3.Connection, sort: str = "bond") -> int:
     "files" and "size" order by each group's total stamped-file count or
     byte size (descending), aggregated over its member directories' direct
     children; "tree-size" is size over each member's entire subtree instead
-    (see _tree_stats for the semantics shift that implies).
+    (see _tree_stats for the semantics shift that implies). The stat sorts'
+    header weight also carries the group's average bytes per member
+    directory (total_size over the member count -- under tree-size a member
+    nested inside another contributes no bytes of its own but still counts
+    as a member, deliberately: the average describes the group's
+    directories, not the deduplicated byte pool).
     """
     gmeta = _get_meta(conn, "groups")
     if gmeta is None or not _table_exists(conn, "group_dirs"):
@@ -1318,8 +1323,10 @@ def report_groups(conn: sqlite3.Connection, sort: str = "bond") -> int:
         members = by_gid[gid]
         weight = ""
         if gid in stats:
+            avg = stats[gid]["total_size"] // len(members)
             weight = (f", {stats[gid]['n_files']} files"
-                      f", {_human_size(stats[gid]['total_size'])}{tree}")
+                      f", {_human_size(stats[gid]['total_size'])}{tree}"
+                      f", avg {_human_size(avg)}/dir")
         top = f", best pair {best[gid]:.3f}" if gid in best else ""
         print(f"\ngroup {gid}  ({len(members)} directories{weight}{top})")
         for path in members:
