@@ -21,7 +21,7 @@ For each file in a directory tree, sumtag:
 2. Skips the file if the recorded mtime matches (already up-to-date).
 3. Otherwise, computes the XXH3 hash of the file's contents and writes the xattr.
 
-Traversal order is deterministic (added 2026-07-03 so output can be followed against an `ls` listing or Finder window): within each directory, files are processed in ascending alphabetical order, then subdirectories are recursed into in the same order. This applies to every mode — the same walker drives stamping, `--verify`, `--remove`, and `--prescan`'s counting pass, so the prescan and the real pass agree on order.
+Traversal order is deterministic (added 2026-07-03 so output can be followed against an `ls` listing or Finder window): within each directory, files are processed in ascending **case-insensitive** alphabetical order (casefolded, with the raw name as a tie-break for case-only twins like `README`/`readme`; made case-insensitive 2026-07-21 to match Finder's ordering), then subdirectories are recursed into in the same order. This applies to every mode — the same walker drives stamping, `--verify`, `--remove`, and `--prescan`'s counting pass, so the prescan and the real pass agree on order.
 
 ## Language & dependencies
 

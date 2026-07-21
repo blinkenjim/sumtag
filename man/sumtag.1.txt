@@ -33,10 +33,11 @@ DESCRIPTION
        they match, the file is considered up to date and is skipped.
        Otherwise the file's contents are hashed and the attribute is written.
 
-       Within each directory, files are processed in ascending alphabetical
-       order and subdirectories are then recursed into in the same order, so
-       the processing order can be followed against an ls(1) listing. This
-       holds in every mode.
+       Within each directory, files are processed in ascending
+       case-insensitive alphabetical order (names differing only by case are
+       ordered by the raw name) and subdirectories are then recursed into in
+       the same order, so the processing order can be followed against a
+       Finder window or an ls(1) listing. This holds in every mode.
 
        Symbolic links are not content: a symlink encountered during traversal
        is never followed, hashed, stamped, verified, or removed, in any mode.

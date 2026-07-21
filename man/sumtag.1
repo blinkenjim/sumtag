@@ -43,9 +43,10 @@ attribute and compares the recorded modification time to the file's current
 mtime. If they match, the file is considered up to date and is skipped.
 Otherwise the file's contents are hashed and the attribute is written.
 .PP
-Within each directory, files are processed in ascending alphabetical order
-and subdirectories are then recursed into in the same order, so the
-processing order can be followed against an
+Within each directory, files are processed in ascending case-insensitive
+alphabetical order (names differing only by case are ordered by the raw
+name) and subdirectories are then recursed into in the same order, so the
+processing order can be followed against a Finder window or an
 .BR ls (1)
 listing. This holds in every mode.
 .PP

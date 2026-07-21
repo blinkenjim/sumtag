@@ -17,6 +17,12 @@ from typing import Callable, Iterator, Sequence
 IGNORE_MARKER = "@sumtag-ignore"
 
 
+def _name_key(name: str) -> tuple[str, str]:
+    """Case-insensitive sort key; the raw name breaks case-only ties so the
+    order stays deterministic ('Readme' vs 'readme')."""
+    return (name.casefold(), name)
+
+
 def _same_path(a: str, b: str) -> bool:
     return os.path.normpath(a) == os.path.normpath(b)
 
@@ -62,9 +68,10 @@ def iter_files(
     directories and file roots draw no call.
 
     Traversal is deterministic: within each directory, files are yielded in
-    ascending alphabetical order and subdirectories are recursed into in the
-    same order (files first, then subdirectories -- os.walk's shape), so the
-    processing order tracks an ls listing or Finder window. Roots are
+    ascending case-insensitive alphabetical order (casefolded; the raw name
+    breaks case-only ties) and subdirectories are recursed into in the same
+    order (files first, then subdirectories -- os.walk's shape), so the
+    processing order tracks a Finder window or `ls` listing. Roots are
     processed in the order given.
     """
     patterns = list(exclude) if exclude else []
@@ -79,8 +86,8 @@ def iter_files(
             yield start
             continue
         for dirpath, dirs, files in os.walk(start, topdown=True):
-            dirs.sort()   # in place: fixes the recursion order
-            files.sort()
+            dirs.sort(key=_name_key)   # in place: fixes the recursion order
+            files.sort(key=_name_key)
             if respect_ignore and IGNORE_MARKER in files:
                 if on_warn is not None and _same_path(dirpath, start):
                     on_warn(f"sumtag: {start}: @sumtag-ignore on scan root; skipping")
