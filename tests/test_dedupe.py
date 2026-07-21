@@ -81,6 +81,41 @@ class DedupeTests(unittest.TestCase):
         self.assertFalse(any(r.endswith(("renamed.txt", "copy2.txt")) for r in rels))
         self.assertTrue(any(r.endswith("unique.txt") for r in rels))
 
+    def test_multiple_culls_deduped_against_one_actual(self):
+        # One ACTUAL, two CULL trees in a single invocation: each cull is
+        # deduped against the same actual, uniques survive, and the summary
+        # names both culls.
+        cull2 = os.path.join(self._tmp.name, "cull2")
+        os.makedirs(cull2)
+        _write(self.actual, "a.txt", b"same")
+        _write(self.cull, "renamed.txt", b"same")
+        _write(self.cull, "only1.txt", b"unique to cull1")
+        _write(cull2, "other.txt", b"same")
+        _write(cull2, "only2.txt", b"unique to cull2")
+        _stamp(self.db, self.actual, self.cull, cull2)
+        code, out, _ = _run(["--database", self.db, self.actual,
+                             self.cull, cull2, "--delete"])
+        self.assertEqual(code, 1)
+        self.assertFalse(os.path.exists(os.path.join(self.cull, "renamed.txt")))
+        self.assertFalse(os.path.exists(os.path.join(cull2, "other.txt")))
+        self.assertTrue(os.path.exists(os.path.join(self.cull, "only1.txt")))
+        self.assertTrue(os.path.exists(os.path.join(cull2, "only2.txt")))
+        self.assertIn("deleted:", out)
+        self.assertIn("2 files", out)          # one from each cull
+        self.assertIn(self.cull, out)          # both culls named in summary
+        self.assertIn(cull2, out)
+
+    def test_actual_may_not_appear_among_the_culls(self):
+        # The one guarantee that matters: ACTUAL disjoint from *every* cull,
+        # even when it is the second of several.
+        _write(self.actual, "a.txt", b"x")
+        _write(self.cull, "b.txt", b"x")
+        _stamp(self.db, self.actual, self.cull)
+        code, _, err = _run(["--database", self.db, self.actual,
+                             self.cull, self.actual])
+        self.assertEqual(code, 2)
+        self.assertIn("same directory", err)
+
     def test_cull_root_survives_even_when_emptied(self):
         _write(self.actual, "a.txt", b"same")
         _write(self.cull, "b.txt", b"same")

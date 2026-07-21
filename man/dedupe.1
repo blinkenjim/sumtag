@@ -7,23 +7,30 @@ dedupe \- delete files from a cull tree that duplicate an actual tree
 .RB [ \-\-delete ]
 .RB [ \-\-allow\-mixed ]
 .RB [ \-n ", " \-\-offline ]
-.I ACTUAL CULL
+.I ACTUAL CULL\&...
 .SH DESCRIPTION
 .B dedupe
-dismantles a redundant copy of a directory tree.
+dismantles one or more redundant copies of a directory tree.
 .I ACTUAL
 is the copy being kept \(em it is never modified, ever.
+Each
 .I CULL
-is the redundant copy: every file in it whose digest duplicates a file in
+is a redundant copy: every file in it whose digest duplicates a file in
 the
 .I corresponding
 directory of
 .I ACTUAL
 is deleted, regardless of name, and directories emptied by this are removed
-on the way back up. If cull holds three files matching one actual-side
+on the way back up. If a cull holds three files matching one actual-side
 witness, all three are deleted. What survives in cull is therefore always a
 signpost \(em something unique, unknown, or suspicious \(em and the cull
 root itself always survives, even empty, as a placeholder and a receipt.
+.PP
+More than one
+.I CULL
+may be given: each is walked in sync against the same
+.I ACTUAL
+in turn, and the run's counters and summary aggregate across them.
 .PP
 .B dedupe
 deletes files. It is an experimental companion to
@@ -104,17 +111,21 @@ file failing a veto simply witnesses nothing.
 .SH SAFETY CHECKS
 All of the following are verified before anything is at risk:
 .IP \(bu 3
-Both roots must exist and be disjoint under
+Every root must exist, and
+.I ACTUAL
+must be disjoint from each cull under
 .BR realpath (3)
 \(em not equal, and neither nested inside the other, so symbolic links
-cannot disguise an overlap.
+cannot disguise an overlap. Culls are not checked against one another: two
+overlapping culls only cost redundant work, never the copy being kept.
 .IP \(bu 3
-The database must already exist and must know both roots: each root's live
+The database must already exist and must know every root: each root's live
 mount point must be recorded and file rows must be present beneath it. An
 unmounted drive is an error, never a silent no-match.
 .IP \(bu 3
-If the two roots' rows carry more than one digest algorithm, the run is
-refused unless
+If the roots' rows carry more than one digest algorithm across
+.I ACTUAL
+and all the culls, the run is refused unless
 .B \-\-allow\-mixed
 is given, because cross-algorithm duplicates would silently survive.
 .IP \(bu 3
@@ -171,7 +182,7 @@ mismatch).
 .SH OPTIONS
 .TP
 .BI \-\-database " DB"
-Path to the sumtag SQLite database that knows both trees. Required.
+Path to the sumtag SQLite database that knows every tree. Required.
 .TP
 .B \-\-delete
 Actually delete. Without it, the run is a complete preview and the database
@@ -230,6 +241,13 @@ Predict what might be deleted while the backup drive is unplugged:
 .PP
 .EX
 dedupe \-\-database /var/lib/sumtag.sqlite \-n /data/proj /backup/proj\-old
+.EE
+.PP
+Dismantle several redundant copies against one kept tree in a single run:
+.PP
+.EX
+dedupe \-\-database /var/lib/sumtag.sqlite \-\-delete /data/proj \\
+    /backup/proj\-old /mnt/archive/proj\-2024
 .EE
 .SH NOTES
 .B dedupe

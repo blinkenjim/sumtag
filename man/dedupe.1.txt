@@ -5,18 +5,22 @@ NAME
 
 SYNOPSIS
        dedupe --database DB [--delete] [--allow-mixed] [-n, --offline] ACTUAL
-       CULL
+       CULL...
 
 DESCRIPTION
-       dedupe dismantles a redundant copy of a directory tree.	ACTUAL is the
-       copy being kept — it is never modified, ever.  CULL is the redundant
-       copy: every file in it whose digest duplicates a file in the
-       corresponding directory of ACTUAL is deleted, regardless of name, and
-       directories emptied by this are removed on the way back up. If cull holds
-       three files matching one actual-side witness, all three are deleted. What
-       survives in cull is therefore always a signpost — something unique,
-       unknown, or suspicious — and the cull root itself always survives, even
-       empty, as a placeholder and a receipt.
+       dedupe dismantles one or more redundant copies of a directory tree.
+       ACTUAL is the copy being kept — it is never modified, ever.  Each CULL
+       is a redundant copy: every file in it whose digest duplicates a file in
+       the corresponding directory of ACTUAL is deleted, regardless of name,
+       and directories emptied by this are removed on the way back up. If a
+       cull holds three files matching one actual-side witness, all three are
+       deleted. What survives in cull is therefore always a signpost —
+       something unique, unknown, or suspicious — and the cull root itself
+       always survives, even empty, as a placeholder and a receipt.
+
+       More than one CULL may be given: each is walked in sync against the same
+       ACTUAL in turn, and the run's counters and summary aggregate across
+       them.
 
        dedupe deletes files. It is an experimental companion to sumtag(1) and
        works from a sumtag SQLite database that already knows both trees; it
@@ -90,17 +94,19 @@ TRUST MODEL
 SAFETY CHECKS
        All of the following are verified before anything is at risk:
 
-       •  Both roots must exist and be disjoint under realpath(3) — not equal,
-	  and neither nested inside the other, so symbolic links cannot disguise
-	  an overlap.
+       •  Every root must exist, and ACTUAL must be disjoint from each cull
+	  under realpath(3) — not equal, and neither nested inside the other, so
+	  symbolic links cannot disguise an overlap. Culls are not checked
+	  against one another: two overlapping culls only cost redundant work,
+	  never the copy being kept.
 
-       •  The database must already exist and must know both roots: each root's
+       •  The database must already exist and must know every root: each root's
 	  live mount point must be recorded and file rows must be present
 	  beneath it. An unmounted drive is an error, never a silent no-match.
 
-       •  If the two roots' rows carry more than one digest algorithm, the run
-	  is refused unless --allow-mixed is given, because cross-algorithm
-	  duplicates would silently survive.
+       •  If the roots' rows carry more than one digest algorithm across ACTUAL
+	  and all the culls, the run is refused unless --allow-mixed is given,
+	  because cross-algorithm duplicates would silently survive.
 
        •  At the moment of deletion, if the cull file and its witness resolve to
 	  the same path under realpath(3), they are one directory entry reached
@@ -139,7 +145,7 @@ OFFLINE PREDICTION
 
 OPTIONS
        --database DB
-	      Path to the sumtag SQLite database that knows both trees.
+	      Path to the sumtag SQLite database that knows every tree.
 	      Required.
 
        --delete
@@ -189,6 +195,12 @@ EXAMPLES
        Predict what might be deleted while the backup drive is unplugged:
 
        dedupe --database /var/lib/sumtag.sqlite -n /data/proj /backup/proj-old
+
+       Dismantle several redundant copies against one kept tree in a single
+       run:
+
+       dedupe --database /var/lib/sumtag.sqlite --delete /data/proj \
+	   /backup/proj-old /mnt/archive/proj-2024
 
 NOTES
        dedupe is experimental — and it is the dangerous companion: always

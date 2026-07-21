@@ -2,10 +2,13 @@
 """dedupe -- delete files from a cull tree that duplicate an actual tree.
 
 The most dangerous companion program: it deletes files. Given a sumtag
-database and two directories known in it -- ACTUAL (the copy being kept,
-never touched) and CULL (the redundant copy being dismantled) -- it walks
-the two trees in lockstep and deletes every cull-side file whose digest
-matches a file in the *corresponding* actual directory, regardless of name.
+database and directories known in it -- ACTUAL (the copy being kept, never
+touched) and one or more CULL trees (the redundant copies being dismantled)
+-- it walks each cull against the same ACTUAL in lockstep and deletes every
+cull-side file whose digest matches a file in the *corresponding* actual
+directory, regardless of name. Multiple culls are processed one after
+another against the same ACTUAL; the counters and summary aggregate across
+them, and ACTUAL is never modified by any of them.
 A directory left empty by this is removed on the way back up. What survives
 in cull is therefore always a signpost: something unique, unknown, or
 suspicious is still in there. The cull root itself is never removed, even
@@ -93,9 +96,11 @@ just means that file witnesses nothing.
 
 Safety checks, all before anything is deleted:
 
-    - ACTUAL and CULL must exist, be directories, and be disjoint after
-      realpath resolution: not the same directory and neither nested
-      inside the other (symlinks cannot disguise an overlap).
+    - ACTUAL and every CULL must exist, be directories, and ACTUAL must be
+      disjoint from each cull after realpath resolution: not the same
+      directory and neither nested inside the other (symlinks cannot
+      disguise an overlap). Culls are not checked against each other -- two
+      overlapping culls only cost redundant work, never the kept copy.
     - The database must already exist (never created here) and must know
       both roots: each root's live mount point must be recorded, with
       file rows under the root -- an absent or elsewhere-mounted drive is
@@ -143,6 +148,7 @@ sumtag's convention.
 Usage:
     dedupe --database DB ACTUAL CULL              # preview (default)
     dedupe --database DB ACTUAL CULL --delete     # actually delete
+    dedupe --database DB ACTUAL CULL1 CULL2 ...   # several culls, one ACTUAL
     dedupe --database DB ACTUAL CULL -n           # offline: what MIGHT be
                                                   #   deleted, predicted from
                                                   #   the database alone
@@ -314,12 +320,14 @@ class Side:
 class Run:
     """State for one dedupe pass: counters, the armed/preview switch, output."""
 
-    def __init__(self, args, db: Db, actual: Side, cull: Side) -> None:
+    def __init__(self, args, db: Db, actual: Side, culls: list[Side]) -> None:
         self.armed = args.delete
         self.offline = args.offline
         self.db = db
         self.actual = actual
-        self.cull = cull
+        self.culls = culls
+        self.cull = culls[0]  # the cull currently being walked; the driver
+        #                       reassigns it per cull, counters accumulating
         self.deleted = 0
         self.deleted_bytes = 0
         self.unsized = 0      # offline candidates whose row has no size
@@ -644,38 +652,49 @@ def offline_pass(run: Run) -> None:
 
 # --- Safety checks and CLI ---------------------------------------------------
 
-def _safety_checks(args) -> tuple[Db, Side, Side] | str:
+def _safety_checks(args) -> tuple[Db, Side, list[Side]] | str:
     """Everything that must hold before a single byte is at risk.
-    Returns (db, actual, cull) or an error message."""
+    Returns (db, actual, culls) or an error message.
+
+    ACTUAL is checked disjoint from *every* cull -- the one guarantee that
+    matters, since a cull that is (or contains, or is contained by) ACTUAL
+    would delete the copy being kept. Culls are deliberately not checked
+    against each other: two overlapping culls only cost redundant work,
+    never the kept copy (settled 2026-07-21)."""
     ra = os.path.realpath(args.actual)
-    rc = os.path.realpath(args.cull)
-    for given, rp in ((args.actual, ra), (args.cull, rc)):
+    rcs = [os.path.realpath(c) for c in args.cull]
+    for given, rp in [(args.actual, ra)] + list(zip(args.cull, rcs)):
         if not os.path.isdir(rp):
             return f"{given}: no such directory (is the drive mounted?)"
-    if ra == rc:
-        return "ACTUAL and CULL are the same directory"
-    if os.path.commonpath([ra, rc]) in (ra, rc):
-        return "ACTUAL and CULL overlap (one contains the other)"
+    for given, rc in zip(args.cull, rcs):
+        if ra == rc:
+            return f"ACTUAL and CULL {given} are the same directory"
+        if os.path.commonpath([ra, rc]) in (ra, rc):
+            return f"ACTUAL and CULL {given} overlap (one contains the other)"
 
     try:
         db = Db(args.database, writable=args.delete)
     except (FileNotFoundError, sqlite3.OperationalError) as e:
         return str(e)
 
-    actual, cull = Side(args.actual, db), Side(args.cull, db)
-    err = _knows_roots(db, actual, cull, args.allow_mixed)
+    actual = Side(args.actual, db)
+    culls = [Side(c, db) for c in args.cull]
+    err = _knows_roots(db, actual, culls, args.allow_mixed)
     if err is not None:
         db.close()
         return err
-    return db, actual, cull
+    return db, actual, culls
 
 
-def _knows_roots(db: Db, actual: Side, cull: Side,
+def _knows_roots(db: Db, actual: Side, culls: list[Side],
                  allow_mixed: bool) -> str | None:
     """The tail both safety paths share: the database must hold rows under
-    both roots, under one digest algorithm unless --allow-mixed."""
+    every root, under one digest algorithm unless --allow-mixed. The
+    algorithm check spans the union of ACTUAL and all culls -- a cull
+    stamped under a different algorithm from ACTUAL would silently witness
+    nothing, exactly the mixed-algorithm hazard."""
     algos: set[str] = set()
-    for side, label in ((actual, "ACTUAL"), (cull, "CULL")):
+    for side, label in [(actual, "ACTUAL")] + [(c, "CULL") for c in culls]:
         if side.mp_id is None or \
                 db.count_under(side.mp_id, side.base_rel) == 0:
             return (f"{side.given}: no database rows under this {label} root "
@@ -689,54 +708,63 @@ def _knows_roots(db: Db, actual: Side, cull: Side,
     return None
 
 
-def _offline_checks(args) -> tuple[Db, Side, Side] | str:
+def _offline_checks(args) -> tuple[Db, Side, list[Side]] | str:
     """The -n counterpart of _safety_checks: nothing may touch the
     filesystem, so existence and realpath are out. Roots resolve lexically
     against the stored mountpoints, disjointness is checked on the resolved
     (mountpoint, rel-prefix) identities, and the no-rows and
-    mixed-algorithm refusals hold unchanged."""
+    mixed-algorithm refusals hold unchanged. ACTUAL is checked disjoint
+    from every cull, as in the live path; culls are not checked against
+    each other."""
     try:
         db = Db(args.database, writable=False)
     except (FileNotFoundError, sqlite3.OperationalError) as e:
         return str(e)
 
-    sides = []
-    for given, label in ((args.actual, "ACTUAL"), (args.cull, "CULL")):
+    actual = Side.offline(args.actual, db)
+    if actual is None:
+        db.close()
+        return (f"{args.actual}: no stored mountpoint contains this ACTUAL "
+                f"root; spell it as sumtag recorded it")
+    culls = []
+    for given in args.cull:
         side = Side.offline(given, db)
         if side is None:
             db.close()
-            return (f"{given}: no stored mountpoint contains this {label} "
+            return (f"{given}: no stored mountpoint contains this CULL "
                     f"root; spell it as sumtag recorded it")
-        sides.append(side)
-    actual, cull = sides
-    if actual.mp_id == cull.mp_id:
-        a, c = actual.base_rel, cull.base_rel
-        if a == c:
-            db.close()
-            return "ACTUAL and CULL are the same directory"
-        if not a or not c or c.startswith(a + "/") or a.startswith(c + "/"):
-            db.close()
-            return "ACTUAL and CULL overlap (one contains the other)"
-    err = _knows_roots(db, actual, cull, args.allow_mixed)
+        culls.append(side)
+    for given, cull in zip(args.cull, culls):
+        if actual.mp_id == cull.mp_id:
+            a, c = actual.base_rel, cull.base_rel
+            if a == c:
+                db.close()
+                return f"ACTUAL and CULL {given} are the same directory"
+            if not a or not c or c.startswith(a + "/") or a.startswith(c + "/"):
+                db.close()
+                return f"ACTUAL and CULL {given} overlap (one contains the other)"
+    err = _knows_roots(db, actual, culls, args.allow_mixed)
     if err is not None:
         db.close()
         return err
-    return db, actual, cull
+    return db, actual, culls
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="dedupe",
-        description="Delete files in CULL whose digests duplicate files in "
-                    "the corresponding directory of ACTUAL (walked in sync). "
+        description="Delete files in one or more CULL trees whose digests "
+                    "duplicate files in the corresponding directory of ACTUAL "
+                    "(each cull walked in sync against the same ACTUAL). "
                     "A bare run only previews; --delete arms it.")
     parser.add_argument("--database", required=True, metavar="DB",
                         help="path to the sumtag SQLite database that knows "
-                             "both trees")
+                             "every tree")
     parser.add_argument("actual", metavar="ACTUAL",
                         help="the directory being kept; never modified")
-    parser.add_argument("cull", metavar="CULL",
-                        help="the redundant directory to dismantle")
+    parser.add_argument("cull", metavar="CULL", nargs="+",
+                        help="the redundant director(y/ies) to dismantle; give "
+                             "one or more, each deduped against ACTUAL in turn")
     parser.add_argument("--delete", action="store_true",
                         help="actually delete (default: preview only, "
                              "database opened read-only)")
@@ -760,20 +788,22 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(checked, str):
         print(f"dedupe: {checked}", file=sys.stderr)
         return EXIT_ERRORS
-    db, actual, cull = checked
+    db, actual, culls = checked
 
     if args.offline:
         # Approximation by consent, announced -- the sumtag idiom.
         print("offline: predicting from database contents alone "
               "(trust vetoes and filesystem checks skipped)")
 
-    run = Run(args, db, actual, cull)
+    run = Run(args, db, actual, culls)
     interrupted = False
     try:
-        if args.offline:
-            offline_pass(run)
-        else:
-            process_pair(run, "", is_root=True)
+        for cull in culls:
+            run.cull = cull
+            if args.offline:
+                offline_pass(run)
+            else:
+                process_pair(run, "", is_root=True)
     except KeyboardInterrupt:
         interrupted = True  # commits are per directory; counters are honest
     finally:
@@ -811,7 +841,7 @@ def main(argv: list[str] | None = None) -> int:
         pairs.append(("errors", str(run.errors)))
     pairs.append(("database", args.database))
     pairs.append(("actual", args.actual))
-    pairs.append(("cull", args.cull))
+    pairs.append(("cull", ", ".join(args.cull)))
     width = max(len(label) for label, _ in pairs) + 1
     for label, value in pairs:
         print(f"{label + ':':<{width}} {value}")
