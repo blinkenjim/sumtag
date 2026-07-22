@@ -211,6 +211,14 @@ Ctrl-C prints the same summary, prefixed by an
 .B interrupted
 line; the counters cover only completed work, and commits are per
 directory, so the database matches what actually happened.
+.PP
+Immediately above the summary, the run echoes the exact command line it was
+invoked with under a
+.B command line:
+heading, shell-quoted so it can be copied and re-run as-is \(em a path
+containing whitespace stays a single argument. This is handy for turning a
+preview into the armed run: copy the line and add
+.BR \-\-delete .
 .SH EXIT STATUS
 .TP
 .B 0

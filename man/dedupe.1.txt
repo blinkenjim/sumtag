@@ -173,6 +173,12 @@ RUN SUMMARY
        interrupted line; the counters cover only completed work, and commits are
        per directory, so the database matches what actually happened.
 
+       Immediately above the summary, the run echoes the exact command line
+       it was invoked with under a command line: heading, shell-quoted so it
+       can be copied and re-run as-is — a path containing whitespace stays a
+       single argument. This is handy for turning a preview into the armed
+       run: copy the line and add --delete.
+
 EXIT STATUS
        0      nothing redundant was found.
 

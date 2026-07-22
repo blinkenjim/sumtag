@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import shlex
 import shutil
 import sqlite3
 import tempfile
@@ -115,6 +116,22 @@ class DedupeTests(unittest.TestCase):
                              self.cull, self.actual])
         self.assertEqual(code, 2)
         self.assertIn("same directory", err)
+
+    def test_echoes_shell_quoted_command_line(self):
+        # Just before the summary, the run echoes a copy-pasteable command
+        # line; a path with whitespace must stay a single quoted argument.
+        spaced = os.path.join(self._tmp.name, "cull with space")
+        os.makedirs(spaced)
+        _write(self.actual, "a.txt", b"same")
+        _write(spaced, "x.txt", b"same")
+        _stamp(self.db, self.actual, spaced)
+        argv = ["--database", self.db, self.actual, spaced]
+        code, out, _ = _run(argv)
+        self.assertEqual(code, 1)
+        self.assertIn("command line:", out)
+        expected = "dedupe " + " ".join(shlex.quote(t) for t in argv)
+        self.assertIn(expected, out)
+        self.assertIn(shlex.quote(spaced), out)  # not split on the space
 
     def test_cull_root_survives_even_when_emptied(self):
         _write(self.actual, "a.txt", b"same")

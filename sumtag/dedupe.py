@@ -161,6 +161,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sqlite3
 import sys
 
@@ -842,6 +843,13 @@ def main(argv: list[str] | None = None) -> int:
     pairs.append(("database", args.database))
     pairs.append(("actual", args.actual))
     pairs.append(("cull", ", ".join(args.cull)))
+
+    # Echo the exact command line just run, shell-quoted, so it can be copied
+    # and re-run as-is; a path containing whitespace stays a single argument.
+    raw = sys.argv[1:] if argv is None else list(argv)
+    print("command line:")
+    print("    " + " ".join(shlex.quote(tok) for tok in [parser.prog, *raw]))
+
     width = max(len(label) for label, _ in pairs) + 1
     for label, value in pairs:
         print(f"{label + ':':<{width}} {value}")
