@@ -179,6 +179,13 @@ RUN SUMMARY
        single argument. This is handy for turning a preview into the armed
        run: copy the line and add --delete.
 
+       As the run works, each action line — the delete, sweep, or rmdir it
+       prints for a path — ends that path with an ls(1) -F style type
+       indicator: * for an executable file, @ for a symbolic link, / for a
+       directory, | for a FIFO, and = for a socket; a plain file gets none.
+       Offline prediction (-n) omits the indicator, since reading a path's
+       type would mean touching the filesystem it deliberately never opens.
+
 EXIT STATUS
        0      nothing redundant was found.
 

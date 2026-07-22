@@ -120,6 +120,9 @@ Arming model: a bare run is a full PREVIEW -- every would-delete,
 would-sweep, and would-rmdir printed, nothing touched, database opened
 read-only. Deletion requires the explicit --delete flag. This inverts
 sumtag's -n convention on purpose; lethality earns opt-in, not opt-out.
+Each action line ends its path with an ls -F type indicator (* executable,
+@ symlink, / directory, | FIFO, = socket; plain files none) -- see
+_ftype_indicator; offline omits it, as reading a type touches the disk.
 
 Offline prediction (-n/--offline, added 2026-07-17): answers "what MIGHT
 be deleted" from the database alone -- no filesystem access at all, so
@@ -163,6 +166,7 @@ import argparse
 import os
 import shlex
 import sqlite3
+import stat
 import sys
 
 from sumtag import schema, xattr
@@ -318,6 +322,29 @@ class Side:
 
 # --- The run -----------------------------------------------------------------
 
+def _ftype_indicator(path: str) -> str:
+    """An ls -F style one-character type indicator for a path, from a single
+    lstat: '@' symlink, '/' directory, '*' executable file, '|' FIFO,
+    '=' socket. A plain non-executable file -- or any stat failure -- gets
+    no indicator (the empty string). The symlink test comes first, so a
+    link is '@' regardless of what it points at (lstat, never followed)."""
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError:
+        return ""
+    if stat.S_ISLNK(mode):
+        return "@"
+    if stat.S_ISDIR(mode):
+        return "/"
+    if stat.S_ISFIFO(mode):
+        return "|"
+    if stat.S_ISSOCK(mode):
+        return "="
+    if stat.S_ISREG(mode) and (mode & 0o111):
+        return "*"
+    return ""
+
+
 class Run:
     """State for one dedupe pass: counters, the armed/preview switch, output."""
 
@@ -342,7 +369,13 @@ class Run:
 
     def say(self, verb: str, path: str) -> None:
         mood = "" if self.armed else ("might " if self.offline else "would ")
-        print(f"{mood}{verb} {path}")
+        # An ls -F style type indicator on the path. Every live say() runs
+        # before the actual removal, so the path still exists to lstat.
+        # Offline never touches the filesystem, so it gets no indicator (its
+        # rows are always plain files anyway -- symlinks and dirs are never
+        # stamped, so never mirrored).
+        suffix = "" if self.offline else _ftype_indicator(path)
+        print(f"{mood}{verb} {path}{suffix}")
 
     def warn(self, msg: str) -> None:
         print(f"dedupe: {msg}", file=sys.stderr)

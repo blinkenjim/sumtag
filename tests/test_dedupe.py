@@ -133,6 +133,28 @@ class DedupeTests(unittest.TestCase):
         self.assertIn(expected, out)
         self.assertIn(shlex.quote(spaced), out)  # not split on the space
 
+    def test_action_lines_carry_ls_f_type_indicators(self):
+        # Each action path ends with an ls -F style indicator: * executable,
+        # @ symlink, / directory; a plain file gets none.
+        _write(self.actual, "run.sh", b"#!/bin/sh\ntrue\n")
+        exe = _write(self.cull, "run.sh", b"#!/bin/sh\ntrue\n")
+        os.chmod(exe, 0o755)
+        _write(self.actual, "plain.txt", b"same")
+        plain = _write(self.cull, "plain.txt", b"same")
+        # A cull-only subdir holding only a relative symlink: the carve-out
+        # sweeps the link and removes the directory.
+        loose = os.path.join(self.cull, "loose")
+        os.makedirs(loose)
+        link = os.path.join(loose, "link")
+        os.symlink("../run.sh", link)
+        _stamp(self.db, self.actual, self.cull)
+        code, out, _ = self._dedupe("--delete")
+        self.assertEqual(code, 1)
+        self.assertIn("run.sh*", out)          # executable duplicate
+        self.assertIn(link + "@", out)         # swept symlink
+        self.assertIn(loose + "/", out)        # rmdir'd directory
+        self.assertIn(plain + "\n", out)       # plain file: no indicator
+
     def test_cull_root_survives_even_when_emptied(self):
         _write(self.actual, "a.txt", b"same")
         _write(self.cull, "b.txt", b"same")

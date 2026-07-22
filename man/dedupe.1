@@ -219,6 +219,26 @@ heading, shell-quoted so it can be copied and re-run as-is \(em a path
 containing whitespace stays a single argument. This is handy for turning a
 preview into the armed run: copy the line and add
 .BR \-\-delete .
+.PP
+As the run works, each action line \(em the
+.BR delete ", " sweep ", or " rmdir
+it prints for a path \(em ends that path with an
+.BR ls (1)
+.BR \-F
+style type indicator:
+.B *
+for an executable file,
+.B @
+for a symbolic link,
+.B /
+for a directory,
+.B |
+for a FIFO, and
+.B =
+for a socket; a plain file gets none. Offline prediction
+.RB ( \-n )
+omits the indicator, since reading a path's type would mean touching the
+filesystem it deliberately never opens.
 .SH EXIT STATUS
 .TP
 .B 0
