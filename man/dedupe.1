@@ -284,6 +284,13 @@ first. Both trees should be freshly stamped
 .RB ( "sumtag \-\-sum \-\-database"
 \&...) before a run, so the trust-model vetoes have current metadata to
 check against; stale stamps cause files to be kept, never wrongly deleted.
+.PP
+If the tree changes under a live run \(em for example a directory deleted
+from the cull side while dedupe is walking it \(em the vanished part is
+skipped with a warning and the run continues, rather than aborting. Because
+deletions are committed per directory, a run stopped this way (or by Ctrl-C)
+leaves what it already removed consistently recorded and can be re-run
+safely to finish.
 .SH SEE ALSO
 .BR sumtag (1),
 .BR grouper (1)

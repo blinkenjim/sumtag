@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 from sumtag import cli, dedupe, schema, xattr
 
@@ -154,6 +155,34 @@ class DedupeTests(unittest.TestCase):
         self.assertIn(link + "@", out)         # swept symlink
         self.assertIn(loose + "/", out)        # rmdir'd directory
         self.assertIn(plain + "\n", out)       # plain file: no indicator
+
+    def test_directory_vanishing_mid_walk_is_survived(self):
+        # A cull subdir removed *during* the walk (as when files are deleted
+        # from the cull tree concurrently) must not crash the run: it is
+        # skipped with a warning and the rest of the cull is still processed.
+        _write(self.actual, "keep/a.txt", b"same")
+        _write(self.cull, "keep/b.txt", b"same")
+        _write(self.actual, "gone/x.txt", b"dup")
+        _write(self.cull, "gone/y.txt", b"dup")
+        _stamp(self.db, self.actual, self.cull)
+
+        real_scan = dedupe._scan
+        victim = os.path.join(self.cull, "gone")
+
+        def flaky_scan(path):
+            # Delete the cull 'gone' dir the instant dedupe scans it, exactly
+            # as a concurrent deletion would, so the scan raises mid-walk.
+            if os.path.abspath(path) == victim:
+                shutil.rmtree(path)
+            return real_scan(path)
+
+        with mock.patch.object(dedupe, "_scan", flaky_scan):
+            code, out, err = self._dedupe("--delete")
+
+        self.assertNotIn("Traceback", err)
+        self.assertIn("vanished", err)
+        # the other directory was still processed to completion
+        self.assertFalse(os.path.exists(os.path.join(self.cull, "keep", "b.txt")))
 
     def test_cull_root_survives_even_when_emptied(self):
         _write(self.actual, "a.txt", b"same")
