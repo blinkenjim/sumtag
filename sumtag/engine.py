@@ -210,6 +210,8 @@ def _normalized_roots(roots) -> list[str]:
     """Scan roots as a sorted, deduplicated list of absolute paths -- the
     stored/compared form, so /data vs /data/ vs a relative spelling of the
     same directory never reads as a roots mismatch."""
+    # abspath (not realpath -- same path discipline as everywhere), set for
+    # dedup, sorted for a canonical comparable form.
     return sorted({os.path.abspath(r) for r in roots})
 
 
