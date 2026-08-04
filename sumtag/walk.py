@@ -82,6 +82,10 @@ def iter_files(
     """
     patterns = list(exclude) if exclude else []
     for start in roots:
+        # Root-level gates first: an excluded root is skipped with a warning
+        # (the user explicitly named it, so silence would be confusing), and
+        # an explicit FILE root is the user's explicit claim -- yielded
+        # as-is, no walk, no on_dir.
         pat = _excluded_by(os.path.basename(os.path.normpath(start)), patterns)
         if pat is not None:
             if on_warn is not None:
@@ -91,30 +95,43 @@ def iter_files(
         if os.path.isfile(start):
             yield start
             continue
+
         for dirpath, dirs, files in os.walk(start, topdown=True):
-            dirs.sort(key=_name_key)   # in place: fixes the recursion order
+            # Sorting both lists in place is what makes the traversal
+            # deterministic: files stream out in this order, and os.walk
+            # recurses into dirs in the (sorted) order we leave behind.
+            dirs.sort(key=_name_key)
             files.sort(key=_name_key)
+
+            # The marker check runs before ANYTHING in this directory is
+            # touched or announced; the whole subtree is pruned by emptying
+            # dirs. Only the explicit scan root earns a warning.
             if respect_ignore and IGNORE_MARKER in files:
                 if on_warn is not None and _same_path(dirpath, start):
                     on_warn(f"sumtag: {start}: @sumtag-ignore on scan root; skipping")
-                dirs[:] = []  # prune the subtree
-                continue       # and skip this directory's files
+                dirs[:] = []
+                continue
+
+            # Excluded subdirectories are pruned exactly like marked ones:
+            # never descended, never announced.
             if patterns:
                 dirs[:] = [d for d in dirs if _excluded_by(d, patterns) is None]
+
             if on_dir is not None:
-                on_dir(dirpath)
+                on_dir(dirpath)  # visited-only, ahead of its files
+
             for name in files:
                 if name == IGNORE_MARKER:
-                    continue   # the marker is never hashed or stamped
+                    continue  # the marker itself is never hashed or stamped
                 if patterns and _excluded_by(name, patterns) is not None:
                     continue
                 path = os.path.join(dirpath, name)
-                # Symlinks are not content (CLAUDE.md "Symbolic links",
-                # fixed 2026-07-16): os.walk lists them under files --
-                # broken ones used to surface as per-file errors, and live
-                # ones were stamped THROUGH the link, planting the xattr on
-                # the target (possibly outside the tree). Skipped in every
-                # mode, silently, like every traversal-level exclusion.
+                # Symlinks are not content (CLAUDE.md "Symbolic links"):
+                # os.walk lists symlinks-to-files here, but yielding one
+                # would hash THROUGH the link -- planting the xattr on the
+                # target, possibly outside the tree -- or error on a broken
+                # one. Skipped silently in every mode, like every
+                # traversal-level exclusion.
                 if os.path.islink(path):
                     continue
                 yield path

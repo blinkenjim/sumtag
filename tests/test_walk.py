@@ -10,9 +10,11 @@ order) and "Command-line exclusion (--exclude)".
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 
-from sumtag.walk import _excluded_by, _name_key
+from sumtag.walk import IGNORE_MARKER, _excluded_by, _name_key, iter_files
 
 
 class NameKeyTests(unittest.TestCase):
@@ -87,6 +89,115 @@ class ExcludedByTests(unittest.TestCase):
         # excludes nothing" -- basenames contain no slash.
         self.assertIsNone(_excluded_by("b", ["a/b"]))
         self.assertIsNone(_excluded_by("sub", ["sub/*"]))
+
+
+class IterFilesTests(unittest.TestCase):
+    """The walker itself, against real temp trees.  Authorities: CLAUDE.md
+    "What it does" (deterministic order), "Ignore markers", and the on_dir
+    contract (each visited directory announced after the prune check,
+    before any of its files).  --exclude and symlink behavior are covered
+    by tests/test_exclude.py and tests/test_symlinks.py.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+
+    def _touch(self, rel: str) -> None:
+        path = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("x")
+
+    def _rels(self, **kwargs) -> list[str]:
+        return [os.path.relpath(p, self.root)
+                for p in iter_files([self.root], **kwargs)]
+
+    def test_order_is_files_first_then_subdirs_case_insensitive(self):
+        # Within each directory: files in case-insensitive alphabetical
+        # order, THEN recursion into subdirectories in the same order --
+        # so the stream tracks a Finder window top to bottom.
+        for rel in ("Beta.txt", "alpha.txt", "Sub/inner.txt", "ant/z.txt"):
+            self._touch(rel)
+        self.assertEqual(self._rels(), [
+            "alpha.txt", "Beta.txt",                  # root files, casefolded
+            os.path.join("ant", "z.txt"),             # then subdirs, in order:
+            os.path.join("Sub", "inner.txt"),         # 'ant' < 'Sub' casefolded
+        ])
+
+    def test_case_only_twin_files_keep_the_tiebreak_order(self):
+        # README before readme: casefold tie broken by the raw name.  On a
+        # case-insensitive filesystem (macOS's default APFS) the two names
+        # are one file and the twin case cannot exist on disk -- skip; the
+        # ordering logic itself is pinned by NameKeyTests against the pure
+        # sort key.
+        self._touch("README")
+        self._touch("readme")
+        if len(os.listdir(self.root)) < 2:
+            self.skipTest("filesystem is case-insensitive; twins collapse")
+        self.assertEqual(self._rels(), ["README", "readme"])
+
+    def test_marker_prunes_the_whole_subtree(self):
+        self._touch("keep.txt")
+        self._touch("vendor/blob.bin")
+        self._touch("vendor/deep/nested.bin")
+        self._touch(f"vendor/{IGNORE_MARKER}")
+        self.assertEqual(self._rels(), ["keep.txt"])
+
+    def test_no_ignore_overrides_markers_but_never_yields_them(self):
+        # respect_ignore=False processes the fenced tree; the marker FILE
+        # itself is still never yielded ("never hashed or stamped").
+        self._touch("vendor/blob.bin")
+        self._touch(f"vendor/{IGNORE_MARKER}")
+        self.assertEqual(self._rels(respect_ignore=False),
+                         [os.path.join("vendor", "blob.bin")])
+
+    def test_marker_on_scan_root_warns_and_skips(self):
+        self._touch("a.txt")
+        self._touch(IGNORE_MARKER)
+        warnings: list[str] = []
+        self.assertEqual(self._rels(on_warn=warnings.append), [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("@sumtag-ignore on scan root", warnings[0])
+
+    def test_marker_below_root_is_silent(self):
+        # Only a marker on the EXPLICIT root earns a warning; interior
+        # markers prune silently.
+        self._touch("keep.txt")
+        self._touch(f"sub/{IGNORE_MARKER}")
+        warnings: list[str] = []
+        self.assertEqual(self._rels(on_warn=warnings.append), ["keep.txt"])
+        self.assertEqual(warnings, [])
+
+    def test_on_dir_announces_visited_dirs_only_before_their_files(self):
+        self._touch("a/f1.txt")
+        self._touch("b/f2.txt")
+        self._touch(f"b/{IGNORE_MARKER}")
+        events: list[tuple[str, str]] = []
+        for path in iter_files([self.root],
+                               on_dir=lambda d: events.append(("dir", d))):
+            events.append(("file", path))
+        # Pruned 'b' draws no on_dir call; every yielded file follows its
+        # directory's announcement.
+        self.assertEqual(events, [
+            ("dir", self.root),
+            ("dir", os.path.join(self.root, "a")),
+            ("file", os.path.join(self.root, "a", "f1.txt")),
+        ])
+
+    def test_file_root_is_yielded_directly(self):
+        # An explicit file argument is the user's explicit claim.
+        self._touch("plain.txt")
+        target = os.path.join(self.root, "plain.txt")
+        self.assertEqual(list(iter_files([target])), [target])
+
+    def test_roots_processed_in_the_order_given(self):
+        self._touch("r1/z.txt")
+        self._touch("r2/a.txt")
+        r1, r2 = (os.path.join(self.root, r) for r in ("r1", "r2"))
+        self.assertEqual(list(iter_files([r2, r1])), [
+            os.path.join(r2, "a.txt"), os.path.join(r1, "z.txt")])
 
 
 if __name__ == "__main__":
