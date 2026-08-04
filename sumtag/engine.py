@@ -307,11 +307,15 @@ def _hash_decision(meta, live: str, args, current_major: int,
     counter shown during the real pass won't line up with what --prescan
     predicted.
     """
+    # Standard mode (--sum) delegates to the re-hash rules. Import/locate-
+    # only mode never computes -- that refusal is the mode's whole point --
+    # unless --force, the flag whose job is overriding defaults about what
+    # gets (re-)computed.
     if use_standard_decision:
         return decide.should_rehash(meta, live, args.force, current_major)
-    rehash = args.force
-    reason = "forced" if args.force else "not computing (--import/--locate only)"
-    return rehash, reason
+    if args.force:
+        return True, "forced"
+    return False, "not computing (--import/--locate only)"
 
 
 def _prescan_stamp(roots, args, rep: _Reporter) -> tuple[int, int]:
