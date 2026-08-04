@@ -250,6 +250,9 @@ class SQLiteStore:
 
     def ensure_mountpoint(self, path: str) -> int:
         """Return the id for a mount point, inserting it once if new."""
+        # One row per distinct mount path, minted once (INSERT OR IGNORE
+        # against the UNIQUE column) and cached: many files share a mount,
+        # so the common case is a dict hit, not a query.
         cached = self._mp_cache.get(path)
         if cached is not None:
             return cached

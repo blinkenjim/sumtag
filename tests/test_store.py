@@ -16,8 +16,11 @@ import sys
 import tempfile
 import unittest
 
-from sumtag.store import (SQLiteStore, _relativize, _walk_up_mount,
-                          open_store)
+from unittest import mock
+
+from sumtag.store import (PrescanSummary, SQLiteStore, StatData, _relativize,
+                          _walk_up_mount, mount_relative, open_store,
+                          read_prescan_summary)
 
 
 class WalkUpMountTests(unittest.TestCase):
@@ -167,6 +170,282 @@ class OpenStoreGrammarTests(unittest.TestCase):
                     open_store(ghost, mode=mode)
                 # The refusal must not create the file as a side effect.
                 self.assertFalse(os.path.exists(ghost))
+
+
+import sqlite3  # noqa: E402  (independent reader for the store tests)
+
+
+def _read_rows(db_path: str) -> list[tuple]:
+    """Read the files table with plain sqlite3 -- the independent reader,
+    never the store's own methods (harness-oracle discipline)."""
+    conn = sqlite3.connect(db_path)
+    try:
+        return conn.execute(
+            "SELECT m.path, f.rel_path, f.algo, f.digest, f.size, f.uid "
+            "FROM files f JOIN mountpoints m ON m.id = f.mountpoint_id "
+            "ORDER BY m.path, f.rel_path").fetchall()
+    finally:
+        conn.close()
+
+
+def _stat(size: int = 100, uid: int = 501) -> StatData:
+    return StatData(size=size, mode=0o100644, uid=uid, gid=20, nlink=1,
+                    dev=7, ctime="2026-08-04T00:00:00.000000Z",
+                    atime="2026-08-04T00:00:01.000000Z", birthtime=None)
+
+
+class SQLiteStoreTests(unittest.TestCase):
+    """The mirror's write methods, against a real temp database.  Authority:
+    CLAUDE.md "Schema" -- identity is (mountpoint_id, rel_path), one row per
+    location, UPSERT in place, COALESCE never clobbers locate columns, and
+    directory deletes are dirname-equality, never recursive.
+    """
+
+    ROW = dict(algo="xxh3", digest="0123456789abcdef",
+               file_mtime="2026-08-01T00:00:00.000000Z",
+               hashed_at="2026-08-01T00:00:01.000000Z",
+               run_started_at="2026-08-01T00:00:00.000000Z",
+               version="0.1.0")
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.db = os.path.join(self._tmp.name, "m.sqlite")
+        self.store = SQLiteStore(self.db)
+        # Tests close explicitly before reading with plain sqlite3; this
+        # cleanup is a guarded backstop (close() is not promised to be
+        # idempotent, and nothing in sumtag double-closes).
+        self.addCleanup(self._close_quietly)
+
+    def _close_quietly(self) -> None:
+        try:
+            self.store.close()
+        except Exception:
+            pass
+
+    def _upsert(self, rel: str, mp_id: int | None = None, *,
+                digest: str = None, algo: str = None,
+                stat: StatData | None = None) -> None:
+        kw = dict(self.ROW)
+        if digest is not None:
+            kw["digest"] = digest
+        if algo is not None:
+            kw["algo"] = algo
+        if mp_id is None:
+            mp_id = self.store.ensure_mountpoint("/mnt/t")
+        self.store.upsert_file(mp_id, rel, 42, kw["algo"], kw["digest"],
+                               kw["file_mtime"], kw["hashed_at"],
+                               kw["run_started_at"], kw["version"], stat=stat)
+
+    def test_ensure_mountpoint_inserts_once(self):
+        a = self.store.ensure_mountpoint("/mnt/backup")
+        b = self.store.ensure_mountpoint("/mnt/backup")
+        c = self.store.ensure_mountpoint("/mnt/other")
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, c)
+        self.store.close()
+        conn = sqlite3.connect(self.db)
+        paths = [r[0] for r in conn.execute(
+            "SELECT path FROM mountpoints ORDER BY path")]
+        conn.close()
+        self.assertEqual(paths, ["/mnt/backup", "/mnt/other"])
+
+    def test_upsert_updates_in_place_by_location(self):
+        # Identity is (mountpoint, rel_path): a re-scan must UPDATE the one
+        # row, never add a second.
+        self._upsert("a/f.bin", digest="1111111111111111")
+        self._upsert("a/f.bin", digest="2222222222222222")
+        self.store.close()
+        rows = _read_rows(self.db)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][3], "2222222222222222")
+
+    def test_algo_switch_replaces_the_single_digest(self):
+        # One row holds one digest per location -- re-stamping under a new
+        # algorithm replaces, matching the xattr's one-entry map.
+        self._upsert("a/f.bin", algo="xxh3", digest="1111111111111111")
+        self._upsert("a/f.bin", algo="md5",
+                     digest="d41d8cd98f00b204e9800998ecf8427e")
+        self.store.close()
+        rows = _read_rows(self.db)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][2], "md5")
+
+    def test_statless_upsert_preserves_locate_columns(self):
+        # The COALESCE contract: a --sum re-scan after a --locate run must
+        # not null out what --locate wrote.
+        self._upsert("a/f.bin", stat=_stat(size=999, uid=77))
+        self._upsert("a/f.bin", digest="2222222222222222", stat=None)
+        self.store.close()
+        rows = _read_rows(self.db)
+        self.assertEqual(rows[0][3], "2222222222222222")  # digest updated...
+        self.assertEqual(rows[0][4], 999)                 # ...stat preserved
+        self.assertEqual(rows[0][5], 77)
+
+    def test_statful_upsert_overwrites_locate_columns(self):
+        self._upsert("a/f.bin", stat=_stat(size=100))
+        self._upsert("a/f.bin", stat=_stat(size=222))
+        self.store.close()
+        self.assertEqual(_read_rows(self.db)[0][4], 222)
+
+    def test_update_stat_is_a_noop_without_a_row(self):
+        mp = self.store.ensure_mountpoint("/mnt/t")
+        self.store.update_stat(mp, "ghost/f.bin", _stat())
+        self.store.close()
+        self.assertEqual(_read_rows(self.db), [])  # nothing conjured
+
+    def test_update_stat_fills_an_existing_row(self):
+        self._upsert("a/f.bin")
+        mp = self.store.ensure_mountpoint("/mnt/t")
+        self.store.update_stat(mp, "a/f.bin", _stat(size=555))
+        self.store.close()
+        rows = _read_rows(self.db)
+        self.assertEqual(rows[0][4], 555)
+        self.assertEqual(rows[0][3], self.ROW["digest"])  # digest untouched
+
+    def _populate_tree(self) -> int:
+        # A small tree: root file, a/ with two files, a/sub with one, b/ one.
+        mp = self.store.ensure_mountpoint("/mnt/t")
+        for rel in ("root.txt", "a/f1.txt", "a/f2.txt", "a/sub/deep.txt",
+                    "b/g.txt"):
+            self._upsert(rel, mp)
+        return mp
+
+    def test_iter_file_dirs_derives_every_directory_with_counts(self):
+        self._populate_tree()
+        # Every directory holding rows appears independently -- the property
+        # that makes --prune-dirs need no recursion.
+        self.assertEqual(self.store.iter_file_dirs("/mnt/t", ""),
+                         [("", 1), ("a", 2), ("a/sub", 1), ("b", 1)])
+
+    def test_iter_file_dirs_scopes_to_the_prefix(self):
+        self._populate_tree()
+        self.assertEqual(self.store.iter_file_dirs("/mnt/t", "a"),
+                         [("a", 2), ("a/sub", 1)])
+        self.assertEqual(self.store.iter_file_dirs("/unknown", ""), [])
+
+    def test_iter_dir_file_paths_is_direct_residents_only(self):
+        self._populate_tree()
+        self.assertEqual(self.store.iter_dir_file_paths("/mnt/t", "a"),
+                         ["a/f1.txt", "a/f2.txt"])   # not a/sub/deep.txt
+        self.assertEqual(self.store.iter_dir_file_paths("/mnt/t", ""),
+                         ["root.txt"])               # mount root residents
+
+    def test_delete_dir_files_is_dirname_equality_never_recursive(self):
+        self._populate_tree()
+        deleted = self.store.delete_dir_files("/mnt/t", "a")
+        self.store.close()
+        self.assertEqual(deleted, 2)                 # a/f1, a/f2 -- only
+        remaining = [r[1] for r in _read_rows(self.db)]
+        self.assertIn("a/sub/deep.txt", remaining)   # the child SURVIVES
+        self.assertEqual(len(remaining), 3)
+
+    def test_delete_files_removes_exactly_the_named_rows(self):
+        self._populate_tree()
+        deleted = self.store.delete_files("/mnt/t",
+                                          ["a/f1.txt", "b/g.txt", "ghost"])
+        self.store.close()
+        self.assertEqual(deleted, 2)                 # ghost matched nothing
+        remaining = [r[1] for r in _read_rows(self.db)]
+        self.assertEqual(remaining, ["a/f2.txt", "a/sub/deep.txt", "root.txt"])
+
+    def test_delete_files_crosses_the_parameter_chunk_boundary(self):
+        # SQLite bounds host parameters; the delete must chunk. 1200 rows
+        # crosses the 500-per-statement chunk twice.
+        mp = self.store.ensure_mountpoint("/mnt/t")
+        rels = [f"big/f{i:04d}" for i in range(1200)]
+        for rel in rels:
+            self._upsert(rel, mp)
+        self.assertEqual(self.store.delete_files("/mnt/t", rels), 1200)
+        self.store.close()
+        self.assertEqual(_read_rows(self.db), [])
+
+
+class PrescanSummaryStoreTests(unittest.TestCase):
+    """The one-row prescan summary: save replaces, read is side-effect-free
+    (CLAUDE.md "--prescan" persistence / "--db-prescan").
+    """
+
+    def _summary(self, count: int = 137) -> PrescanSummary:
+        return PrescanSummary(file_count=count, total_bytes=4200,
+                              roots=["/data"], sum_mode=True, force=False,
+                              exclude=["*.vob"], no_ignore=False,
+                              created_at="2026-08-04T12:00:00.000000Z")
+
+    def test_save_and_read_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "p.sqlite")
+            store = SQLiteStore(db)
+            store.save_prescan_summary(self._summary())
+            store.close()
+            got = read_prescan_summary(db)
+            self.assertEqual(got, self._summary())
+
+    def test_second_save_replaces_the_one_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = os.path.join(tmp, "p.sqlite")
+            store = SQLiteStore(db)
+            store.save_prescan_summary(self._summary(count=1))
+            store.save_prescan_summary(self._summary(count=2))
+            store.close()
+            self.assertEqual(read_prescan_summary(db).file_count, 2)
+            conn = sqlite3.connect(db)
+            n = conn.execute("SELECT COUNT(*) FROM prescan_summary").fetchone()[0]
+            conn.close()
+            self.assertEqual(n, 1)
+
+    def test_read_missing_is_none_and_creates_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ghost = os.path.join(tmp, "none.sqlite")
+            self.assertIsNone(read_prescan_summary(ghost))
+            self.assertFalse(os.path.exists(ghost))  # ro open, no side effect
+            # A database without the row is also None, not an error.
+            db = os.path.join(tmp, "empty.sqlite")
+            SQLiteStore(db).close()
+            self.assertIsNone(read_prescan_summary(db))
+
+    def test_read_rejects_foreign_schemes(self):
+        with self.assertRaises(NotImplementedError):
+            read_prescan_summary("mysql://host/db")
+
+
+class MountRelativeTests(unittest.TestCase):
+    """The top-level split: (mount, rel) such that join recomposes to the
+    original file, verified samefile -- the invariant everything downstream
+    (mirror rows, prune, dedupe) leans on.
+    """
+
+    def test_recomposes_for_real_paths(self):
+        # The invariant is RECOMPOSITION, not non-escaping: a path whose
+        # spelling crosses a symlink (macOS's /var -> private/var, where
+        # tempfile.gettempdir() lives) cannot samefile-verify the rebase,
+        # and the documented fallback is the escaping lexical form -- which
+        # still recomposes, the kernel resolving the .. segments.
+        for path in (os.path.expanduser("~"), tempfile.gettempdir(),
+                     __file__):
+            with self.subTest(path=path):
+                mount, rel = mount_relative(path)
+                recon = os.path.join(mount, rel) if rel != "." else mount
+                self.assertTrue(os.path.samefile(recon, path))
+
+    def test_home_gets_the_non_escaping_form(self):
+        # Where the rebase CAN verify (the home directory under the macOS
+        # Data-volume firmlink, or any genuinely-under-its-mount path
+        # elsewhere), the emitted rel must be the non-escaping one -- the
+        # firmlink bug's fix.
+        mount, rel = mount_relative(os.path.expanduser("~"))
+        self.assertFalse(rel.startswith(os.pardir))
+
+    def test_ismount_walk_fallback(self):
+        # With the statfs shortcut disabled (the non-darwin branch's shape),
+        # the injected ismount decides the boundary.
+        with mock.patch("sumtag.store._mount_point", return_value=None):
+            fake_mounts = {"/", os.path.realpath(tempfile.gettempdir())}
+            probe = os.path.join(os.path.realpath(tempfile.gettempdir()),
+                                 "x", "y.txt")
+            mount, rel = mount_relative(probe, ismount=fake_mounts.__contains__)
+            self.assertEqual(mount, os.path.realpath(tempfile.gettempdir()))
+            self.assertEqual(rel, os.path.join("x", "y.txt"))
 
 
 if __name__ == "__main__":
