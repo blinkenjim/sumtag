@@ -343,6 +343,11 @@ class SQLiteStore:
         recursion: a vanished parent implies vanished children, and every
         child that held files is independently in this list.
         """
+        # Directories are DERIVED: the schema stores no directory table, so
+        # the distinct dirnames of the file rows under the prefix are the
+        # answer -- and because every directory that holds files appears
+        # here independently, --prune-dirs needs no recursion. An unknown
+        # mount matches nothing (the unmounted-drive guard's second half).
         row = self._conn.execute(
             "SELECT id FROM mountpoints WHERE path = ?",
             (mount_path,)).fetchone()
