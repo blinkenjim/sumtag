@@ -273,6 +273,13 @@ class SQLiteStore:
         ``None``, existing locate columns are preserved via COALESCE so a
         stat-less update never clobbers data written by a prior ``--locate`` run.
         """
+        # One statement, keyed on the location identity: INSERT the fresh
+        # row, or on conflict UPDATE it in place. The primary columns
+        # (inode, algo, digest, timestamps, version) always take the new
+        # values -- the single-digest replacement contract rides on algo/
+        # digest being overwritten. The locate columns COALESCE: a stat-less
+        # update (stat=None binds NULLs) keeps whatever a prior --locate
+        # wrote, while real stat data overwrites.
         sd = stat
         self._conn.execute(
             """
