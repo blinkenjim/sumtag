@@ -78,6 +78,9 @@ if _IS_MACOS:
 
     def remove(path, name: str) -> bool:
         """Delete the attribute; return whether it was present to delete."""
+        # ENOATTR means there was nothing to delete -- that is a report
+        # (False), not an error; any other failure raises. True means the
+        # attribute existed and is now gone.
         p, n = os.fsencode(path), name.encode()
         if _libc.removexattr(p, n, 0) < 0:
             if ctypes.get_errno() == _ENOATTR:
