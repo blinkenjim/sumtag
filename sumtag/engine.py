@@ -380,6 +380,9 @@ def _pct(done: float, total: float) -> str:
 def _prescan_prefix(index: int, total_count: int, bytes_so_far: int,
                     total_bytes: int, si: bool) -> str:
     """Render --prescan's "nnn/mmm (pp%)  so-far/total (pp%)  " prefix."""
+    # nnn zero-padded to mmm's width keeps the column aligned as the count
+    # climbs; each fraction carries its percentage token; two-space
+    # separators, including the trailing one before the announcement.
     width = len(str(total_count)) if total_count else 1
     so_far_h = progress_mod.human_size(bytes_so_far, si)
     total_h = progress_mod.human_size(total_bytes, si)
