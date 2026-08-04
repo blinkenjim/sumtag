@@ -148,6 +148,9 @@ def human_size(n: float, si: bool) -> str:
 
 def _format_elapsed(seconds: float) -> str:
     """Render elapsed time as H:MM:SS."""
+    # Whole seconds only, truncated: a stopwatch never shows a second that
+    # hasn't fully passed. Hours are unpadded (a fact can be any width);
+    # minutes and seconds are clock-padded to two digits.
     total = int(seconds)
     h, rem = divmod(total, 3600)
     m, s = divmod(rem, 60)
