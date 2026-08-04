@@ -103,6 +103,9 @@ def _stat_data(st: os.stat_result) -> StatData:
 
 def _read_meta(path: str) -> dict | None:
     """Return the parsed sumtag xattr, or None if absent/unreadable/malformed."""
+    # The absent/unreadable/malformed collapse: whatever the failure --
+    # no attribute, bad bytes, wrong shape -- the decision layer sees None
+    # ("no usable metadata"), one except clause wide.
     raw = xattr.get(path, schema.XATTR_NAME)
     if raw is None:
         return None
