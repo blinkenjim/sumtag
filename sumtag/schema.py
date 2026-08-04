@@ -29,7 +29,9 @@ ALGO = "xxh3"
 
 def major_of(version: str) -> int:
     """Return the semver major component of a version string."""
-    return int(version.split(".", 1)[0])
+    # Everything before the first dot, as an int -- "10.20.30" -> 10.
+    major, _, _ = version.partition(".")
+    return int(major)
 
 
 # --- timestamps (ISO 8601 UTC, microsecond precision, 'Z' suffix) ---------
