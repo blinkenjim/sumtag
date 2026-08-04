@@ -101,10 +101,13 @@ else:  # Linux and other platforms: ismount() correctly sees device boundaries.
 
 def _walk_up_mount(abs_dir: str, ismount) -> str:
     """Walk up from a directory until ismount() reports a mount boundary."""
+    # Climb parents until one reports a mount boundary; the filesystem root
+    # (its own parent) is the terminal answer even if ismount never fires,
+    # so a pathological predicate cannot loop forever.
     cur = abs_dir
     while not ismount(cur):
         parent = os.path.dirname(cur)
-        if parent == cur:  # reached the filesystem root
+        if parent == cur:
             break
         cur = parent
     return cur
