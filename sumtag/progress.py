@@ -179,6 +179,10 @@ def _format_eta(seconds: float) -> str:
 
 def _render_bar(frac: float, width: int) -> str:
     """Render a pv-style bar: '=' fill, '>' leading edge, spaces remaining."""
+    # Clamp defensively (a rate hiccup must never tear the bar), round the
+    # fill boundary to the nearest cell, and spend the last filled cell on
+    # the '>' edge -- except at the extremes: an empty bar leads with the
+    # edge alone, a full bar is a solid wall with nothing left to lead.
     frac = min(max(frac, 0.0), 1.0)
     filled = int(round(frac * width))
     if filled <= 0:
