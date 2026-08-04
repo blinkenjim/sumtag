@@ -671,16 +671,20 @@ def max_identical(n_a: int, n_b: int, n_matched: int) -> int:
     likely the directories are dissimilar anyway, so the imperfection is
     self-limiting.
     """
+    # Identical directories of n files score exactly 3n, so dividing by
+    # 3*max keeps "1.0 means identical contents" true by construction.
     return 3 * max(n_a, n_b)
 
 
 def max_smaller(n_a: int, n_b: int, n_matched: int) -> int:
     """Max achievable given the sizes: 3 * min(|A|, |B|). Subset scores 1.0."""
+    # The most the smaller side could contribute: a perfect subset tops out.
     return 3 * min(n_a, n_b)
 
 
 def max_matched(n_a: int, n_b: int, n_matched: int) -> int:
     """Max given the names that matched: 3 * n_matched. Loosest of the three."""
+    # Only the names that DID match set the bar -- the loosest denominator.
     return 3 * n_matched
 
 
