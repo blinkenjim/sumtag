@@ -821,6 +821,9 @@ def _candidate_partners(index: dict, sig, d: int) -> list:
     ordering makes each unordered pair the responsibility of exactly one
     outer directory, mirroring the exhaustive triangular loop.
     """
+    # Union the postings of every key d carries, keep only ids AFTER d
+    # (each unordered pair is exactly one outer dir's responsibility, the
+    # triangular-loop mirror), dedup via the set, sort for determinism.
     partners: set = set()
     for tok in sig.keys():
         ds = index.get(tok)
