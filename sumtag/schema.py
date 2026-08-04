@@ -68,6 +68,9 @@ _REQUIRED_KEYS = ("version", "digests", "file_mtime", "hashed_at", "run_started_
 
 def build_meta(digests: dict[str, str], file_mtime: str, run_started_at: str) -> dict:
     """Assemble a fresh xattr document."""
+    # Exactly the five schema keys. The digests map is copied so the
+    # document never aliases caller state; hashed_at is stamped here, at
+    # build time; version is always the running software's own.
     return {
         "version": VERSION,
         "digests": dict(digests),
