@@ -607,6 +607,9 @@ def sig_digest(files) -> Counter:
     Digests only compare within one algorithm (the mixed-algorithm hazard,
     CLAUDE.md Database storage), so the tuples carry algo alongside digest.
     """
+    # One (algo, digest) entry per file -- algo rides along because digests
+    # only mean "same bytes" within one algorithm (the mixed-algo hazard).
+    # A Counter, not a set: repetition is part of a directory's identity.
     return Counter((r["algo"], r["digest"]) for r in files)
 
 
