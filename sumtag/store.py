@@ -511,6 +511,12 @@ def read_prescan_summary(value: str) -> PrescanSummary | None:
     --database first" error. Non-SQLite DSNs raise NotImplementedError,
     matching open_store.
     """
+    # Same value grammar as open_store (foreign schemes rejected, sqlite://
+    # unwrapped, else a plain path), then a strictly read-only open: a
+    # missing database must never be created as a byproduct (--db-prescan
+    # composes with -n, whose contract is no side effects anywhere). Every
+    # flavor of absence -- no file, no table, no row -- is None; the caller
+    # turns that into the hard run---prescan-first error.
     if _SCHEME_RE.match(value):
         scheme, _, rest = value.partition("://")
         if scheme != "sqlite":
@@ -528,7 +534,7 @@ def read_prescan_summary(value: str) -> PrescanSummary | None:
               FROM prescan_summary WHERE id = 1
             """).fetchone()
         conn.close()
-    except sqlite3.OperationalError:  # file absent/unopenable or table absent
+    except sqlite3.OperationalError:
         return None
     if row is None:
         return None
