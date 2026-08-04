@@ -43,10 +43,14 @@ def iso_utc_ns(ns: int) -> str:
     Works from integer nanoseconds to avoid float rounding at the microsecond
     boundary, so two equal ``st_mtime_ns`` values always format identically.
     """
+    # Split into whole seconds and the sub-second remainder in integer math,
+    # then TRUNCATE the remainder to microseconds (never round: rounding
+    # could carry across the boundary and break comparison symmetry with a
+    # stored stamp).  Fixed 27-char width keeps lexicographic order = time
+    # order (CLAUDE.md "Timestamp precision").
     sec, nsec = divmod(ns, 1_000_000_000)
-    micro = nsec // 1000  # truncate ns -> us, the stored precision
     dt = datetime.fromtimestamp(sec, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{micro:06d}Z"
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{nsec // 1000:06d}Z"
 
 
 def now_iso() -> str:
