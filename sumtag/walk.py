@@ -36,6 +36,9 @@ def _excluded_by(name: str, patterns: Sequence[str]) -> str | None:
     Matching is fnmatchcase: case-sensitive on every platform, no normcase
     surprises -- the same name matches the same pattern on macOS and Linux.
     """
+    # First match wins (which pattern gets reported is cosmetic; matching at
+    # all is the contract). A pattern containing '/' can never match: a
+    # basename never contains one.
     for pat in patterns:
         if fnmatch.fnmatchcase(name, pat):
             return pat
