@@ -81,8 +81,12 @@ class _Reporter:
 
 def _stat_data(st: os.stat_result) -> StatData:
     """Build a StatData from an os.stat_result, handling platform differences."""
+    # Straight st_* mapping into the locate columns; times go through the
+    # schema's ns formatter. birthtime exists only where the platform
+    # provides it (macOS) -- and only as a float of seconds, so it is
+    # scaled to ns before formatting; None elsewhere maps to a NULL column.
     birthtime = None
-    if hasattr(st, "st_birthtime"):  # macOS
+    if hasattr(st, "st_birthtime"):
         birthtime = schema.iso_utc_ns(int(st.st_birthtime * 1_000_000_000))
     return StatData(
         size=st.st_size,
