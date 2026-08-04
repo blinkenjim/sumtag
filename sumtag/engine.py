@@ -370,6 +370,9 @@ def _pct(done: float, total: float) -> str:
     (--db-prescan drift can push past 100%; that line simply widens,
     harmless in an appended log.)
     """
+    # Zero total reads as complete (the progress-bar convention); the >3
+    # width keeps (  0%) through (100%) one token wide, and drift past 100
+    # simply widens -- harmless in an appended log.
     frac = (done / total) if total else 1.0
     return f"({frac * 100:>3.0f}%)"
 
