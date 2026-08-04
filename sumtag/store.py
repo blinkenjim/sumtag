@@ -403,13 +403,18 @@ class SQLiteStore:
         once per directory, so an interrupted run keeps completed prunes,
         same as delete_dir_files).
         """
+        # Exact rel_paths, deleted in slices of 500 bound parameters to stay
+        # well under SQLite's per-statement limit; unknown paths simply
+        # match nothing. One commit for the whole batch -- the caller
+        # (--prune-all) invokes this once per directory, preserving the
+        # per-directory commit contract.
         row = self._conn.execute(
             "SELECT id FROM mountpoints WHERE path = ?",
             (mount_path,)).fetchone()
         if row is None:
             return 0
         deleted = 0
-        CHUNK = 500  # stay well under SQLite's bound-parameter limit
+        CHUNK = 500
         for i in range(0, len(rel_paths), CHUNK):
             chunk = rel_paths[i:i + CHUNK]
             cur = self._conn.execute(
