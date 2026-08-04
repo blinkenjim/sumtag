@@ -93,8 +93,14 @@ def loads(raw: bytes) -> dict:
     Raises ``ValueError`` if the bytes are not the expected JSON object shape, so
     callers can treat a malformed xattr the same as an absent one.
     """
+    # Non-UTF-8 bytes and invalid JSON already raise ValueError subclasses
+    # (UnicodeDecodeError, JSONDecodeError); the shape checks below fold the
+    # remaining malformations into the same contract, so callers need exactly
+    # one except clause to mean "no usable metadata".
     doc = json.loads(raw.decode("utf-8"))
-    if not isinstance(doc, dict) or any(k not in doc for k in _REQUIRED_KEYS):
+    if not isinstance(doc, dict):
+        raise ValueError("xattr is not a sumtag metadata document")
+    if any(key not in doc for key in _REQUIRED_KEYS):
         raise ValueError("xattr is not a sumtag metadata document")
     if not isinstance(doc["digests"], dict):
         raise ValueError("digests is not a map")
