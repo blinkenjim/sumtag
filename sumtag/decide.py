@@ -65,14 +65,22 @@ def classify_verify(meta: dict | None, live_mtime: str, computed: dict[str, str]
     mismatch with an *unchanged* mtime is the alarm case; a mismatch with a
     *changed* mtime is merely a stale stamp.
     """
+    # No usable record -> nothing to verify against: unverifiable, never
+    # corruption (CLAUDE.md "Verification").
     if meta is None:
         return UNVERIFIABLE
     stored = meta.get("digests", {})
     if not stored:
         return UNVERIFIABLE
 
-    all_match = all(stored[a] == computed.get(a) for a in stored)
-    if all_match:
-        return INTACT  # contents identical, regardless of mtime
-    mtime_same = meta["file_mtime"] == live_mtime
-    return CORRUPTION if mtime_same else STALE
+    # Intact requires EVERY stored algorithm's digest to match its fresh
+    # recomputation -- generic iteration over whatever the map holds. A full
+    # match is intact regardless of mtime (touched but content identical).
+    if all(computed.get(algo) == digest for algo, digest in stored.items()):
+        return INTACT
+
+    # Some digest disagrees: the mtime gate decides which row of the truth
+    # table this is. "Same" vs "changed" is pure equality -- any difference,
+    # in either direction, means the modification left a trace (stale); only
+    # an UNCHANGED mtime makes the mismatch silent corruption.
+    return CORRUPTION if meta["file_mtime"] == live_mtime else STALE

@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import unittest
 
-from sumtag.decide import should_rehash
+from sumtag import decide
+from sumtag.decide import classify_verify, should_rehash
 
 # Hand-written ISO 8601 UTC microsecond stamps (the xattr timestamp format).
 T0 = "2026-07-01T12:00:00.000000Z"           # a reference instant
@@ -217,6 +218,114 @@ class ReasonStringCharacterization(unittest.TestCase):
                 _, reason = should_rehash(meta, live, force=force,
                                           current_major=1 if expected == "older major version" else CURRENT_MAJOR)
                 self.assertEqual(reason, expected)
+
+
+class ClassifyVerifyTruthTable(unittest.TestCase):
+    """The CLAUDE.md "Verification" truth table, one test per row.
+
+    Independent authority, quoted:
+
+        | stored mtime vs live mtime | digest   | meaning                    |
+        | same                       | match    | verified intact            |
+        | same                       | mismatch | SILENT CORRUPTION (alarm)  |
+        | changed                    | mismatch | legitimately modified      |
+        | changed                    | match    | touched but identical -- fine |
+
+        A file with no usable xattr is reported as unverifiable (distinct
+        from a mismatch -- there is nothing to verify against), never as
+        corruption.
+
+    ``computed`` maps each algorithm present in the xattr to the freshly
+    recomputed digest of the live bytes.
+    """
+
+    STORED = "0123456789abcdef"
+    OTHER = "fedcba9876543210"   # a differing digest: the bytes changed
+
+    def test_same_mtime_matching_digest_is_intact(self):
+        meta = make_meta(digests={"xxh3": self.STORED}, file_mtime=T0)
+        outcome = classify_verify(meta, T0, {"xxh3": self.STORED})
+        self.assertEqual(outcome, decide.INTACT)
+
+    def test_same_mtime_mismatch_is_corruption(self):
+        # THE alarm case (intent #1): contents changed while mtime did not.
+        meta = make_meta(digests={"xxh3": self.STORED}, file_mtime=T0)
+        outcome = classify_verify(meta, T0, {"xxh3": self.OTHER})
+        self.assertEqual(outcome, decide.CORRUPTION)
+
+    def test_changed_mtime_mismatch_is_stale_not_corruption(self):
+        # "file was legitimately modified; the stamp is merely stale
+        # (restamp needed) -- not corruption"
+        meta = make_meta(digests={"xxh3": self.STORED}, file_mtime=T0)
+        outcome = classify_verify(meta, T_LATER_DAY, {"xxh3": self.OTHER})
+        self.assertEqual(outcome, decide.STALE)
+
+    def test_changed_mtime_matching_digest_is_intact(self):
+        # "touched but content identical -- fine"
+        meta = make_meta(digests={"xxh3": self.STORED}, file_mtime=T0)
+        outcome = classify_verify(meta, T_LATER_DAY, {"xxh3": self.STORED})
+        self.assertEqual(outcome, decide.INTACT)
+
+    def test_no_metadata_is_unverifiable(self):
+        self.assertEqual(classify_verify(None, T0, {}), decide.UNVERIFIABLE)
+
+    def test_empty_digest_map_is_unverifiable(self):
+        # A document with no digest has nothing to verify against -- same
+        # bucket as no document at all, never corruption.
+        meta = make_meta(digests={}, file_mtime=T0)
+        self.assertEqual(classify_verify(meta, T0, {}), decide.UNVERIFIABLE)
+
+
+class ClassifyVerifyProperties(unittest.TestCase):
+    """Invariants beyond the four table rows, hand-derived."""
+
+    STORED = ClassifyVerifyTruthTable.STORED
+    OTHER = ClassifyVerifyTruthTable.OTHER
+
+    def test_mtime_gate_is_equality_not_ordering(self):
+        # The table's rows are "same" vs "changed": ANY difference is
+        # "changed", including a live mtime EARLIER than the stored one
+        # (clock stepped back, file restored).  A mismatch there is still
+        # stale, not corruption -- the mtime did leave a trace.
+        meta = make_meta(digests={"xxh3": self.STORED}, file_mtime=T_LATER_DAY)
+        outcome = classify_verify(meta, T0, {"xxh3": self.OTHER})
+        self.assertEqual(outcome, decide.STALE)
+
+    def test_multiple_digests_all_matching_is_intact(self):
+        # "every algorithm present in the digests map is recomputed and
+        # compared; generic iteration, no special-casing."
+        meta = make_meta(digests={"xxh3": self.STORED,
+                                  "md5": "d41d8cd98f00b204e9800998ecf8427e"},
+                         file_mtime=T0)
+        computed = {"xxh3": self.STORED,
+                    "md5": "d41d8cd98f00b204e9800998ecf8427e"}
+        self.assertEqual(classify_verify(meta, T0, computed), decide.INTACT)
+
+    def test_any_single_mismatch_defeats_intact(self):
+        # Intact requires EVERY stored digest to match: one disagreeing
+        # algorithm means the bytes cannot equal what was stamped.  With an
+        # unchanged mtime that is the corruption row.
+        meta = make_meta(digests={"xxh3": self.STORED,
+                                  "md5": "d41d8cd98f00b204e9800998ecf8427e"},
+                         file_mtime=T0)
+        computed = {"xxh3": self.OTHER,
+                    "md5": "d41d8cd98f00b204e9800998ecf8427e"}
+        self.assertEqual(classify_verify(meta, T0, computed), decide.CORRUPTION)
+
+    def test_any_single_mismatch_with_changed_mtime_is_stale(self):
+        meta = make_meta(digests={"xxh3": self.STORED,
+                                  "md5": "d41d8cd98f00b204e9800998ecf8427e"},
+                         file_mtime=T0)
+        computed = {"xxh3": self.OTHER,
+                    "md5": "d41d8cd98f00b204e9800998ecf8427e"}
+        self.assertEqual(classify_verify(meta, T_LATER_DAY, computed),
+                         decide.STALE)
+
+    def test_outcomes_are_four_distinct_values(self):
+        # The engine dispatches on these; they must be pairwise distinct.
+        outcomes = {decide.INTACT, decide.CORRUPTION, decide.STALE,
+                    decide.UNVERIFIABLE}
+        self.assertEqual(len(outcomes), 4)
 
 
 if __name__ == "__main__":
