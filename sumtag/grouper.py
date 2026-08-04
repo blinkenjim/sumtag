@@ -619,6 +619,9 @@ def sig_name_digest(files) -> Counter:
     All-or-nothing per file: a byte-identical file under a different name
     matches nothing here.
     """
+    # The file's own name (basename -- the directory prefix is the dir's
+    # identity, not the file's) bound to its content: a rename breaks the
+    # tuple, which is exactly this function's all-or-nothing semantics.
     return Counter((os.path.basename(r["rel_path"]), r["algo"], r["digest"])
                    for r in files)
 
