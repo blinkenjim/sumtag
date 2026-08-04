@@ -82,6 +82,8 @@ def build_meta(digests: dict[str, str], file_mtime: str, run_started_at: str) ->
 
 def dumps(meta: dict) -> bytes:
     """Serialize a metadata document to the UTF-8 JSON bytes stored in the xattr."""
+    # UTF-8 JSON per the schema; exact layout (key order, whitespace) is not
+    # contractual -- readers parse, they never compare bytes.
     return json.dumps(meta).encode("utf-8")
 
 
