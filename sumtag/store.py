@@ -426,6 +426,12 @@ class SQLiteStore:
         Committed immediately, so an interrupted --prune-dirs keeps the
         prunes it completed.
         """
+        # The delete twin of iter_dir_file_paths: dirname equality, NEVER a
+        # recursive prefix delete -- a vanished child directory is its own
+        # candidate with its own check, and deleting beyond the residents
+        # here would strip rows a still-existing subdirectory owns.
+        # Committed immediately: one commit per directory is what keeps an
+        # interrupted prune's summary honest.
         row = self._conn.execute(
             "SELECT id FROM mountpoints WHERE path = ?",
             (mount_path,)).fetchone()
