@@ -689,6 +689,9 @@ MAX_SCORES = {
 
 def sig_names(files) -> dict:
     """Signature: basename -> (algo, digest); basenames are unique in a dir."""
+    # basename -> (algo, digest). A plain dict is safe because basenames
+    # are unique within one directory -- which is also what collapses the
+    # name-anchored comparison to a 1:1 match on name.
     return {os.path.basename(r["rel_path"]): (r["algo"], r["digest"])
             for r in files}
 
