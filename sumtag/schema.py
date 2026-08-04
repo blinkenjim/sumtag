@@ -55,8 +55,10 @@ def iso_utc_ns(ns: int) -> str:
 
 def now_iso() -> str:
     """Return the current time as a microsecond ISO UTC stamp."""
+    # datetime.now(utc) already carries microseconds; format them at the
+    # fixed six-digit width the schema requires.
     dt = datetime.now(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond:06d}Z"
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{dt.microsecond:06d}Z"
 
 
 # --- (de)serialization ----------------------------------------------------
