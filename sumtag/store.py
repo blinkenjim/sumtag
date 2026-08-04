@@ -553,6 +553,11 @@ def mount_relative(path, ismount=os.path.ismount) -> tuple[str, str]:
     other platforms (and as a fallback if statfs fails) it comes from walking
     up with ``ismount`` (injectable for testing) until a mount boundary.
     """
+    # abspath, never realpath: rel_paths are recorded from paths as the
+    # user spelled them (the path-discipline contract dedupe leans on).
+    # statfs answers directly where available (macOS, where ismount is
+    # blind to firmlinks); otherwise the ismount walk starts from the
+    # containing DIRECTORY -- ismount on a file is meaningless.
     ap = os.path.abspath(path)
     start = ap if os.path.isdir(ap) else os.path.dirname(ap)
     mount = _mount_point(ap) or _walk_up_mount(start, ismount)
