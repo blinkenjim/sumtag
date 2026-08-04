@@ -459,6 +459,9 @@ class SQLiteStore:
 
     def save_prescan_summary(self, s: PrescanSummary) -> None:
         """Store the prescan totals, replacing any previous summary (one per db)."""
+        # The fixed id=1 plus INSERT OR REPLACE is the one-row-ever rule:
+        # every save replaces the previous summary outright. List-valued
+        # context (roots, exclude) is stored as JSON text; booleans as 0/1.
         self._conn.execute(
             """
             INSERT OR REPLACE INTO prescan_summary
