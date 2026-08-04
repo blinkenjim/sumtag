@@ -10,10 +10,12 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import shlex
 import shutil
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 from sumtag import cli, dedupe, schema, xattr
 
@@ -80,6 +82,107 @@ class DedupeTests(unittest.TestCase):
         conn.close()
         self.assertFalse(any(r.endswith(("renamed.txt", "copy2.txt")) for r in rels))
         self.assertTrue(any(r.endswith("unique.txt") for r in rels))
+
+    def test_multiple_culls_deduped_against_one_actual(self):
+        # One ACTUAL, two CULL trees in a single invocation: each cull is
+        # deduped against the same actual, uniques survive, and the summary
+        # names both culls.
+        cull2 = os.path.join(self._tmp.name, "cull2")
+        os.makedirs(cull2)
+        _write(self.actual, "a.txt", b"same")
+        _write(self.cull, "renamed.txt", b"same")
+        _write(self.cull, "only1.txt", b"unique to cull1")
+        _write(cull2, "other.txt", b"same")
+        _write(cull2, "only2.txt", b"unique to cull2")
+        _stamp(self.db, self.actual, self.cull, cull2)
+        code, out, _ = _run(["--database", self.db, self.actual,
+                             self.cull, cull2, "--delete"])
+        self.assertEqual(code, 1)
+        self.assertFalse(os.path.exists(os.path.join(self.cull, "renamed.txt")))
+        self.assertFalse(os.path.exists(os.path.join(cull2, "other.txt")))
+        self.assertTrue(os.path.exists(os.path.join(self.cull, "only1.txt")))
+        self.assertTrue(os.path.exists(os.path.join(cull2, "only2.txt")))
+        self.assertIn("deleted:", out)
+        self.assertIn("2 files", out)          # one from each cull
+        self.assertIn(self.cull, out)          # both culls named in summary
+        self.assertIn(cull2, out)
+
+    def test_actual_may_not_appear_among_the_culls(self):
+        # The one guarantee that matters: ACTUAL disjoint from *every* cull,
+        # even when it is the second of several.
+        _write(self.actual, "a.txt", b"x")
+        _write(self.cull, "b.txt", b"x")
+        _stamp(self.db, self.actual, self.cull)
+        code, _, err = _run(["--database", self.db, self.actual,
+                             self.cull, self.actual])
+        self.assertEqual(code, 2)
+        self.assertIn("same directory", err)
+
+    def test_echoes_shell_quoted_command_line(self):
+        # Just before the summary, the run echoes a copy-pasteable command
+        # line; a path with whitespace must stay a single quoted argument.
+        spaced = os.path.join(self._tmp.name, "cull with space")
+        os.makedirs(spaced)
+        _write(self.actual, "a.txt", b"same")
+        _write(spaced, "x.txt", b"same")
+        _stamp(self.db, self.actual, spaced)
+        argv = ["--database", self.db, self.actual, spaced]
+        code, out, _ = _run(argv)
+        self.assertEqual(code, 1)
+        self.assertIn("command line:", out)
+        expected = "dedupe " + " ".join(shlex.quote(t) for t in argv)
+        self.assertIn(expected, out)
+        self.assertIn(shlex.quote(spaced), out)  # not split on the space
+
+    def test_action_lines_carry_ls_f_type_indicators(self):
+        # Each action path ends with an ls -F style indicator: * executable,
+        # @ symlink, / directory; a plain file gets none.
+        _write(self.actual, "run.sh", b"#!/bin/sh\ntrue\n")
+        exe = _write(self.cull, "run.sh", b"#!/bin/sh\ntrue\n")
+        os.chmod(exe, 0o755)
+        _write(self.actual, "plain.txt", b"same")
+        plain = _write(self.cull, "plain.txt", b"same")
+        # A cull-only subdir holding only a relative symlink: the carve-out
+        # sweeps the link and removes the directory.
+        loose = os.path.join(self.cull, "loose")
+        os.makedirs(loose)
+        link = os.path.join(loose, "link")
+        os.symlink("../run.sh", link)
+        _stamp(self.db, self.actual, self.cull)
+        code, out, _ = self._dedupe("--delete")
+        self.assertEqual(code, 1)
+        self.assertIn("run.sh*", out)          # executable duplicate
+        self.assertIn(link + "@", out)         # swept symlink
+        self.assertIn(loose + "/", out)        # rmdir'd directory
+        self.assertIn(plain + "\n", out)       # plain file: no indicator
+
+    def test_directory_vanishing_mid_walk_is_survived(self):
+        # A cull subdir removed *during* the walk (as when files are deleted
+        # from the cull tree concurrently) must not crash the run: it is
+        # skipped with a warning and the rest of the cull is still processed.
+        _write(self.actual, "keep/a.txt", b"same")
+        _write(self.cull, "keep/b.txt", b"same")
+        _write(self.actual, "gone/x.txt", b"dup")
+        _write(self.cull, "gone/y.txt", b"dup")
+        _stamp(self.db, self.actual, self.cull)
+
+        real_scan = dedupe._scan
+        victim = os.path.join(self.cull, "gone")
+
+        def flaky_scan(path):
+            # Delete the cull 'gone' dir the instant dedupe scans it, exactly
+            # as a concurrent deletion would, so the scan raises mid-walk.
+            if os.path.abspath(path) == victim:
+                shutil.rmtree(path)
+            return real_scan(path)
+
+        with mock.patch.object(dedupe, "_scan", flaky_scan):
+            code, out, err = self._dedupe("--delete")
+
+        self.assertNotIn("Traceback", err)
+        self.assertIn("vanished", err)
+        # the other directory was still processed to completion
+        self.assertFalse(os.path.exists(os.path.join(self.cull, "keep", "b.txt")))
 
     def test_cull_root_survives_even_when_emptied(self):
         _write(self.actual, "a.txt", b"same")
