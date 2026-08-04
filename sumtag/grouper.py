@@ -800,6 +800,11 @@ def _kept_index(sigs: dict, max_df: int) -> dict:
     a token in k dirs witnesses k*(k-1)/2 candidate pairs, so one
     .DS_Store-grade token would reinstate the all-pairs blowup by itself.
     """
+    # Invert: every signature key -> the dirs carrying it. Then keep only
+    # keys in 2..max_df dirs: a singleton key can nominate no pair, and a
+    # key past the cap is ubiquitous noise (k dirs witness k*(k-1)/2
+    # candidates -- one .DS_Store-grade key would reinstate the all-pairs
+    # blowup by itself). Sorted ids give deterministic scoring order.
     index: dict = {}
     for d, sig in sigs.items():
         for tok in sig.keys():
