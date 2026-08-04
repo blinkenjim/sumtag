@@ -709,12 +709,13 @@ def make_name_score(max_fn):
     Returns (similarity, matched); matched here is the shared-basename count
     -- this function's own notion of a file in common."""
     def score(a: dict, b: dict) -> tuple[float, int]:
+        # 1 point per shared basename; +2 more when its (algo, digest)
+        # tuple agrees exactly -- tuple equality is what refuses to compare
+        # digests across algorithms (name point only; never guess about
+        # content). 3 points is a perfect pair.
         matched = a.keys() & b.keys()
-        points = len(matched)          # 1 point per shared basename
+        points = len(matched)
         for name in matched:
-            # Tuple equality requires same algo AND digest: a pair stamped
-            # under different algorithms is incomparable, so it earns the
-            # name point only -- we never guess about content.
             if a[name] == b[name]:
                 points += 2
         denom = max_fn(len(a), len(b), len(matched))
