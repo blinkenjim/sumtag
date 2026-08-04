@@ -636,8 +636,12 @@ def _multiset_jaccard(a: Counter, b: Counter) -> tuple[float, int]:
     A fully renamed copy still scores 1.0 under sig_digest -- filenames were
     never in its signature.
     """
+    # Counter & and | are multiset intersection (elementwise min) and union
+    # (elementwise max); their totals give |A & B| / |A | B| directly. The
+    # empty-vs-empty case is defined as identical (1.0) before the division
+    # can trip on a zero union; the intersection size doubles as matched.
     if not a and not b:
-        return 1.0, 0  # two empty directories have identical (empty) contents
+        return 1.0, 0
     inter = sum((a & b).values())
     union = sum((a | b).values())
     return inter / union, inter
