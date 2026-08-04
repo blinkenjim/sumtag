@@ -47,6 +47,11 @@ if _IS_MACOS:
         raise OSError(err, os.strerror(err), path)
 
     def get(path, name: str) -> bytes | None:
+        # Two-call protocol: a NULL buffer asks for the value's size, then a
+        # sized buffer fetches it. ENOATTR is the absent case (None); any
+        # other negative return is a real error. The value can shrink
+        # between the calls (unlikely but legal), so trust the second
+        # call's byte count, not the first's.
         p, n = os.fsencode(path), name.encode()
         size = _libc.getxattr(p, n, None, 0, 0, 0)
         if size < 0:
