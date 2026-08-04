@@ -126,15 +126,20 @@ def _relativize(abs_path: str, mount: str) -> str:
     with ``samefile`` before trusting it, and only fall back to the (escaping)
     lexical form if the rebase doesn't point back at the same file.
     """
+    # The normal case: a non-escaping lexical relpath recomposes by
+    # construction and is the answer.
     rel = os.path.relpath(abs_path, mount)
-    if not (rel == os.pardir or rel.startswith(os.pardir + os.sep)):
-        return rel  # abs_path is genuinely under mount -- the normal case
+    if rel != os.pardir and not rel.startswith(os.pardir + os.sep):
+        return rel
+    # Escaping: try the firmlink rebase -- the whole rooted path replanted
+    # under the mount -- and trust it only if samefile proves it reaches the
+    # very same file. Otherwise the escaping form is all that is left.
     rebased = os.path.relpath(abs_path, "/")
     try:
         if os.path.samefile(os.path.join(mount, rebased), abs_path):
             return rebased
     except OSError:
-        pass
+        pass  # nothing at the rebased location; keep the lexical form
     return rel
 
 # A value is a DSN iff it matches scheme://… ; otherwise it is a SQLite file
