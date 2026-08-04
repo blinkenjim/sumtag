@@ -465,6 +465,8 @@ def _scan(dir_path: str):
 
 def _oserr(exc: OSError) -> str:
     """A short, human message for an OSError (the errno text, or its str)."""
+    # Errno-carrying errors have a clean strerror ("No such file or
+    # directory"); a bare OSError("msg") has none, so fall back to its str.
     return exc.strerror or str(exc)
 
 
