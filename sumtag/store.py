@@ -450,6 +450,11 @@ def open_store(value: str, mode: str = "rwc"):
     ``mode`` is passed through to the backend (see SQLiteStore): ``rwc``
     creates a missing database, ``rw``/``ro`` require an existing one.
     """
+    # scheme:// (slashes required) is a DSN dispatched by scheme; anything
+    # else -- including a bare "name:host" with no slashes -- is a SQLite
+    # file path, ':' being a perfectly legal filename character. Unknown
+    # schemes are recognized-and-rejected so a future backend can claim
+    # them without ever reinterpreting today's paths.
     if _SCHEME_RE.match(value):
         scheme, _, rest = value.partition("://")
         if scheme == "sqlite":

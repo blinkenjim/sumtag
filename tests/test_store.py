@@ -16,7 +16,8 @@ import sys
 import tempfile
 import unittest
 
-from sumtag.store import _relativize, _walk_up_mount
+from sumtag.store import (SQLiteStore, _relativize, _walk_up_mount,
+                          open_store)
 
 
 class WalkUpMountTests(unittest.TestCase):
@@ -109,6 +110,63 @@ class RelativizeTests(unittest.TestCase):
         self.assertFalse(rel.startswith(os.pardir))
         self.assertTrue(
             os.path.samefile(os.path.join("/System/Volumes/Data", rel), home))
+
+
+class OpenStoreGrammarTests(unittest.TestCase):
+    """CLAUDE.md "--database value grammar": no scheme -> SQLite file path;
+    scheme:// -> a DSN dispatched by scheme (sqlite:// accepted, others
+    recognized and rejected "not yet supported"); the // is required -- a
+    bare "mysql:host" is a path, because ':' is legal in filenames.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_plain_path_opens_sqlite(self):
+        path = os.path.join(self._tmp.name, "db.sqlite")
+        store = open_store(path)
+        try:
+            self.assertIsInstance(store, SQLiteStore)
+        finally:
+            store.close()
+        self.assertTrue(os.path.exists(path))  # rwc created it
+
+    def test_sqlite_scheme_is_accepted(self):
+        path = os.path.join(self._tmp.name, "via-dsn.sqlite")
+        store = open_store(f"sqlite://{path}")
+        try:
+            self.assertIsInstance(store, SQLiteStore)
+        finally:
+            store.close()
+        self.assertTrue(os.path.exists(path))
+
+    def test_foreign_schemes_are_recognized_and_rejected(self):
+        for dsn in ("mysql://user@host:3306/db",
+                    "postgresql://user@host:5432/db"):
+            with self.subTest(dsn=dsn):
+                with self.assertRaises(NotImplementedError) as ctx:
+                    open_store(dsn)
+                self.assertIn("not yet supported", str(ctx.exception))
+
+    def test_colon_without_slashes_is_a_path(self):
+        # "mysql:host" has no // -- it is a filename, and rwc creates it.
+        path = os.path.join(self._tmp.name, "mysql:host")
+        store = open_store(path)
+        try:
+            self.assertIsInstance(store, SQLiteStore)
+        finally:
+            store.close()
+        self.assertTrue(os.path.exists(path))
+
+    def test_ro_and_rw_require_an_existing_database(self):
+        ghost = os.path.join(self._tmp.name, "missing.sqlite")
+        for mode in ("ro", "rw"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(FileNotFoundError):
+                    open_store(ghost, mode=mode)
+                # The refusal must not create the file as a side effect.
+                self.assertFalse(os.path.exists(ghost))
 
 
 if __name__ == "__main__":
