@@ -317,6 +317,10 @@ class SQLiteStore:
         Used by ``--locate`` in ``--import`` mode for files that lack a usable
         xattr but may already have a row from a previous stamping run.
         """
+        # A bare UPDATE: zero rows matched (no prior mirror row) is the
+        # documented no-op -- stat data alone never conjures a files row,
+        # because a row without a digest would violate the schema's NOT
+        # NULLs and mean nothing.
         self._conn.execute(
             """
             UPDATE files
