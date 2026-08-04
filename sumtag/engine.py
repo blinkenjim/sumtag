@@ -219,6 +219,10 @@ def _summary_mismatch(summary, args) -> str | None:
     """Why the stored prescan summary doesn't answer this run's question,
     or None if it matches. Every field that changes which files get counted
     participates (CLAUDE.md "--db-prescan": match-or-error, full context)."""
+    # One check per field that changed which files got counted, each named
+    # with its documented wording. Roots compare as normalized sets (a
+    # respelling is not a mismatch); exclude patterns compare sorted (order
+    # never changed what was counted).
     if _normalized_roots(summary.roots) != _normalized_roots(args.directories):
         return "different scan roots"
     if summary.sum_mode != bool(args.sum):
