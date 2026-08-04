@@ -868,14 +868,19 @@ similarity); `groups`, `group_dirs` (the persisted partition); `grouper_meta` (p
 
 ## dedupe — delete duplicate files from a cull tree
 
-`dedupe --database DB ACTUAL CULL` deletes every file in CULL whose digest duplicates a file
-in the **corresponding** ACTUAL directory (regardless of name); directories emptied by this
-are removed on the way up. ACTUAL is never modified. **It deletes files** — the dangerous
-companion.
+`dedupe --database DB ACTUAL CULL...` deletes every file in a CULL whose digest duplicates a
+file in the **corresponding** ACTUAL directory (regardless of name); directories emptied by
+this are removed on the way up. ACTUAL is never modified. **It deletes files** — the
+dangerous companion.
 
-- **REQ-DEDUPE-1** (CLI) — `--database DB` (required), positional `ACTUAL` and `CULL`,
-  `--delete` (arm), `--allow-mixed`, `-n`/`--offline`. `-n` with `--delete` is a usage error
+- **REQ-DEDUPE-1** (CLI) — `--database DB` (required), positional `ACTUAL` and `CULL...`
+  (**one or more** culls, `nargs="+"`; multi-cull added 2026-07-21), `--delete` (arm),
+  `--allow-mixed`, `-n`/`--offline`. `-n` with `--delete` is a usage error
   (`--delete conflicts with -n/--offline (a prediction cannot arm)`).
+- **REQ-DEDUPE-1a** (multi-cull semantics) — Each cull is walked in sync against the *same*
+  ACTUAL **in turn** — sequential single-cull passes, not a new comparison mode. One shared
+  run: counters and the summary aggregate across all culls, and the summary's `cull:` line
+  lists them all. ACTUAL, never modified, is safe to reuse across every pass.
 - **REQ-DEDUPE-2** (arming model) — A **bare** run is a full **preview**: every
   `would delete`/`would sweep`/`would rmdir` printed, nothing touched, database opened
   read-only. Deletion requires the explicit `--delete` flag (this deliberately inverts
@@ -927,14 +932,17 @@ companion.
   name. Same inode+dev with **different** realpaths is a genuine **hard link**: safe to
   delete (the data keeps its ACTUAL-side name), noted with
   `<path>: hard link of <w>; deleting the name is safe …`.
-- **REQ-DEDUPE-13** (safety checks, before any deletion) — ACTUAL and CULL must exist, be
-  directories, and be **disjoint under realpath** (not equal, neither nested). The database
-  must already exist (never created) and must **know both roots**: each root's live mount is
-  recorded, with ≥1 file row under it — else
+- **REQ-DEDUPE-13** (safety checks, before any deletion) — Every root must exist and be a
+  directory, and ACTUAL must be **disjoint from each cull under realpath** (not equal,
+  neither nested). Culls are deliberately **not** checked against each other (settled
+  2026-07-21): two overlapping culls only cost redundant work, never the kept copy — the one
+  guarantee that matters is ACTUAL never appearing as a cull. The database must already
+  exist (never created) and must **know every root**: each root's live mount is recorded,
+  with ≥1 file row under it — else
   `<root>: no database rows under this <ACTUAL|CULL> root (mounted at <m>); scan it with
-  sumtag first`. A candidate set spanning more than one algorithm is refused without
-  `--allow-mixed`: `mixed digest algorithms under these roots (<a>, <b>): … pass
-  --allow-mixed to proceed anyway`.
+  sumtag first`. A candidate set spanning more than one algorithm **across the union of
+  ACTUAL and all culls** is refused without `--allow-mixed`: `mixed digest algorithms under
+  these roots (<a>, <b>): … pass --allow-mixed to proceed anyway`.
 - **REQ-DEDUPE-14** (path discipline) — The walk and row lookups use **abspath** (exactly how
   sumtag records rel_paths), never realpath or a symlinked component (macOS `/var` →
   `/private/var` would match zero rows). `realpath` is reserved for the safety checks. Roots
@@ -954,16 +962,39 @@ companion.
   (`offline: predicting from database contents alone (trust vetoes and filesystem checks
   skipped)`), the database opens read-only, and the summary headline is `might delete:`
   (rows without sizes add `(+N of unknown size)` to the byte total). Surviving safety checks:
-  root disjointness (on resolved mountpoint+rel identities), the no-rows refusal, and the
-  mixed-algorithm refusal.
+  ACTUAL-vs-each-cull disjointness (on resolved mountpoint+rel identities), the no-rows
+  refusal, and the mixed-algorithm refusal. Offline output omits the type indicators of
+  REQ-DEDUPE-18 (reading a type is filesystem access, which offline forbids; mirrored rows
+  are plain files regardless).
 - **REQ-DEDUPE-16** (summary + exit) — The summary is the house `label: value` block:
   headline `deleted:` / `would delete:` / `might delete:` with count and human size; then
   `swept`/`would sweep`, `removed`/`would remove` (directories), `kept` (with a
   `unique`/`unknown`/`stale` breakdown), `fenced`, `errors` — each only when nonzero — then
-  `database:`, `actual:`, `cull:`. Exit codes (house 0/1/2): `0` nothing redundant; `1`
-  duplicates found (deleted or would-delete); `2` errors or a safety refusal. Ctrl-C prints
-  the same summary and exits **130** (commits are per directory; counters count only
-  completed work).
+  `database:`, `actual:`, `cull:` (listing **all** culls). Exit codes (house 0/1/2): `0`
+  nothing redundant; `1` duplicates found (deleted or would-delete); `2` errors or a safety
+  refusal. Ctrl-C prints the same summary and exits **130** (commits are per directory;
+  counters count only completed work).
+- **REQ-DEDUPE-17** (command-line echo, added 2026-07-22) — Immediately above the summary
+  block, every run prints its own invocation under a `command line:` heading: the clean
+  program name (argparse `prog`, not `sys.argv[0]`) followed by the actual arguments
+  (`sys.argv[1:]`, or the passed list under test), each shell-quoted via `shlex.quote` so
+  paths with whitespace stay one argument. Copy-paste convenience: a preview becomes the
+  armed run by appending `--delete`. Always printed — dedupe has no `-q` — including under
+  `-n` and after Ctrl-C.
+- **REQ-DEDUPE-18** (type indicators, added 2026-07-22) — Each `delete`/`sweep`/`rmdir`
+  action line ends its path with an `ls -F`-style one-character type indicator, read with
+  one `lstat` **before** the removal (the path must still exist to stat): `@` symlink, `/`
+  directory, `*` executable file, `|` FIFO, `=` socket; a plain file gets none. The symlink
+  test comes first, so a link reads `@` regardless of its target's type. Offline omits the
+  indicator (see REQ-DEDUPE-15).
+- **REQ-DEDUPE-19** (live-tree tolerance, hardened 2026-07-22) — A tree changing under a
+  live run (e.g. the operator deleting from the cull during it) is skipped with a warning,
+  never a traceback: a vanished cull directory is treated as already-gone and no longer
+  blocks its parent; a vanished ACTUAL directory just witnesses nothing (its cull files are
+  kept — the safe direction); a file gone between `scandir` and `stat` is skipped; the armed
+  `os.remove`/`os.rmdir` swallow `FileNotFoundError` (already gone), while any other
+  `OSError` is reported and keeps the directory a blocker. Per-directory commits keep an
+  interrupted or crashed run persisted and safely re-runnable.
 
 ## dbmerge — combine per-volume databases into one
 
@@ -1204,7 +1235,7 @@ only.) `type`/`action` are given because they affect parsing (e.g. `count`, `app
 |---|---|---|---|
 | `--database` | — | str, **required** | metavar `DB` |
 | `actual` | — | positional | metavar `ACTUAL` |
-| `cull` | — | positional | metavar `CULL` |
+| `cull` | — | positional, `nargs="+"` | metavar `CULL` (one or more) |
 | `--delete` | — | `store_true` | |
 | `--allow-mixed` | — | `store_true` | (dest `allow_mixed`) |
 | `--offline` | `-n` | `store_true` | |
