@@ -127,16 +127,21 @@ def human_size(n: float, si: bool) -> str:
     units = _SI_UNITS if si else _BINARY_UNITS
     value = float(n)
     idx = 0
+    # Promote to the next unit at each power of the base; the table's last
+    # entry (PiB/PB) never promotes -- the mantissa just grows past it.
     while value >= base and idx < len(units) - 1:
         value /= base
         idx += 1
     if idx == 0:
-        return f"{int(value)}{units[idx]}"
+        return f"{int(value)}{units[0]}"  # whole bytes, no decimal
     text = f"{value:.1f}"
     if len(text) > len("999.9"):
-        # A four-digit mantissa (binary units cover 1000.0-1023.9 before
-        # promoting, e.g. a DVD VOB's 1023.8MiB) would overflow the fixed
-        # field widths and wrap the progress line; drop the decimal instead.
+        # The four-digit-mantissa rule (fixed 2026-07-19): binary units
+        # cover 1000.0-1023.9 before promoting (a DVD VOB's 1023.8MiB), and
+        # a four-digit mantissa with a decimal would overflow the fixed
+        # size/rate field budgets and wrap the progress line. Drop the
+        # decimal instead -- checked on the FORMATTED text, so a value that
+        # .1f rounds up to "1000.0" is caught too.
         text = f"{value:.0f}"
     return text + units[idx]
 

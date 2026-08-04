@@ -195,5 +195,154 @@ class MidHashErrorClearsTests(_WidthFixture):
         self._assert_cleared_before_error(err)
 
 
+class HumanSizeUnitTableTests(unittest.TestCase):
+    """Independent-oracle additions (re-code batch 3): the unit tables and
+    promotion points, hand-derived from CLAUDE.md "--si" / "Line format" --
+    binary powers-of-1024 KiB/MiB/GiB by default, decimal powers-of-1000
+    kB/MB/GB with --si.  (HumanSizeTests above already pins the doc's own
+    example values and the four-digit-band rule.)
+    """
+
+    def test_binary_unit_progression(self):
+        # Promotion happens exactly at each power of 1024.
+        cases = [
+            (1, "1B"),
+            (1023, "1023B"),
+            (1024, "1.0KiB"),
+            (1536, "1.5KiB"),          # 1.5 * 1024, exact
+            (1024**2, "1.0MiB"),
+            (1024**3, "1.0GiB"),
+            (1024**4, "1.0TiB"),
+            (1024**5, "1.0PiB"),
+        ]
+        for n, expected in cases:
+            with self.subTest(n=n):
+                self.assertEqual(human_size(n, si=False), expected)
+
+    def test_si_unit_progression(self):
+        # Base-1000 promotion, lowercase k per SI.
+        cases = [
+            (999, "999B"),
+            (1000, "1.0kB"),
+            (1500, "1.5kB"),
+            (1000**2, "1.0MB"),
+            (1000**3, "1.0GB"),
+            (1000**4, "1.0TB"),
+            (1000**5, "1.0PB"),
+        ]
+        for n, expected in cases:
+            with self.subTest(n=n):
+                self.assertEqual(human_size(n, si=True), expected)
+
+    def test_top_unit_never_promotes_past_the_table(self):
+        # There is no unit above PiB/PB: the mantissa just grows (and the
+        # four-digit rule drops its decimal).
+        self.assertEqual(human_size(1024**6, si=False), "1024PiB")
+        self.assertEqual(human_size(1000**6, si=True), "1000PB")
+
+
+class FormatElapsedTests(unittest.TestCase):
+    """CLAUDE.md "Line format": elapsed is H:MM:SS (a fact, clock-styled).
+    Hand-derived arithmetic; fractional seconds truncate (a stopwatch shows
+    whole seconds elapsed, never rounds a second up before it has passed).
+    """
+
+    def test_hand_cases(self):
+        cases = [
+            (0, "0:00:00"),
+            (59, "0:00:59"),
+            (60, "0:01:00"),
+            (65, "0:01:05"),
+            (312, "0:05:12"),          # the CLAUDE.md example line's 0:05:12
+            (3599, "0:59:59"),
+            (3600, "1:00:00"),
+            (5 * 3600 + 7 * 60 + 9, "5:07:09"),
+        ]
+        for seconds, expected in cases:
+            with self.subTest(seconds=seconds):
+                self.assertEqual(progress_mod._format_elapsed(seconds),
+                                 expected)
+
+    def test_fractional_seconds_truncate(self):
+        self.assertEqual(progress_mod._format_elapsed(59.94), "0:00:59")
+
+
+class FormatEtaTests(unittest.TestCase):
+    """CLAUDE.md "Line format": eta is a compact human duration -- its own
+    three documented forms "45s", "5m12s", "1h05m" -- deliberately distinct
+    from elapsed's clock style.  Boundaries hand-derived: the minute form
+    takes over at 60s, the hour form at 3600s; sub-hour seconds and
+    sub-day minutes are zero-padded to two digits (the doc's "1h05m" shows
+    the padding; "5m12s" is consistent with it).
+    """
+
+    def test_documented_forms(self):
+        self.assertEqual(progress_mod._format_eta(45), "45s")
+        self.assertEqual(progress_mod._format_eta(5 * 60 + 12), "5m12s")
+        self.assertEqual(progress_mod._format_eta(3600 + 5 * 60), "1h05m")
+
+    def test_boundaries(self):
+        cases = [
+            (0, "0s"),
+            (59, "59s"),
+            (60, "1m00s"),
+            (3599, "59m59s"),
+            (3600, "1h00m"),
+            (26 * 3600 + 30 * 60, "26h30m"),  # no day unit; hours just grow
+        ]
+        for seconds, expected in cases:
+            with self.subTest(seconds=seconds):
+                self.assertEqual(progress_mod._format_eta(seconds), expected)
+
+
+class RenderBarTests(unittest.TestCase):
+    """CLAUDE.md "Line format": pv-style bar -- '=' fill, '>' leading edge,
+    spaces for the remainder.  The bar is ephemeral tty output, so these are
+    structural properties (hand-derived from that description), not pixel
+    pins: exact rounding of the fill boundary is pinned separately as
+    characterization.
+    """
+
+    def test_empty_and_full(self):
+        # No fill: the leading edge sits at the far left.  Full: solid
+        # '=' wall, no edge left to lead with.
+        self.assertEqual(progress_mod._render_bar(0.0, 10), ">" + " " * 9)
+        self.assertEqual(progress_mod._render_bar(1.0, 10), "=" * 10)
+
+    def test_structure_at_every_width_and_fraction(self):
+        for width in (1, 2, 5, 28, 80):
+            for pct in range(0, 101, 7):
+                frac = pct / 100
+                with self.subTest(width=width, frac=frac):
+                    bar = progress_mod._render_bar(frac, width)
+                    self.assertEqual(len(bar), width)         # exact width
+                    self.assertRegex(bar, r"^=*>? *$")        # =s, edge, spaces
+                    self.assertLessEqual(bar.count(">"), 1)   # one edge at most
+
+    def test_fill_is_monotonic_in_frac(self):
+        # More progress can never render as less bar: the width of the
+        # non-space prefix (fill plus edge) never shrinks as frac grows.
+        widths = [len(progress_mod._render_bar(p / 100, 28).rstrip())
+                  for p in range(0, 101, 5)]
+        self.assertEqual(widths, sorted(widths))
+
+    def test_out_of_range_fractions_clamp(self):
+        # Defensive: a rate hiccup must never render a torn bar.
+        self.assertEqual(progress_mod._render_bar(-0.5, 10),
+                         progress_mod._render_bar(0.0, 10))
+        self.assertEqual(progress_mod._render_bar(1.5, 10),
+                         progress_mod._render_bar(1.0, 10))
+
+    def test_rounding_characterization(self):
+        # CHARACTERIZATION ONLY: the fill boundary rounds to nearest
+        # (int(round(frac * width))).  Nothing documents this choice; it is
+        # pinned so a re-code keeps redraws visually identical, not because
+        # nearest-rounding is more correct than floor.
+        self.assertEqual(progress_mod._render_bar(0.84, 28),
+                         "=" * 23 + ">" + " " * 4)   # 23.52 -> 24 filled
+        self.assertEqual(progress_mod._render_bar(0.05, 10),
+                         ">" + " " * 9)              # 0.5 -> round-half-even 0
+
+
 if __name__ == "__main__":
     unittest.main()
