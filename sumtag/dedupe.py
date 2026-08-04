@@ -328,6 +328,12 @@ def _ftype_indicator(path: str) -> str:
     '=' socket. A plain non-executable file -- or any stat failure -- gets
     no indicator (the empty string). The symlink test comes first, so a
     link is '@' regardless of what it points at (lstat, never followed)."""
+    # One lstat, never followed. Order matters twice: the symlink test runs
+    # FIRST so a link is '@' whatever it points at, and the executable test
+    # runs LAST, gated on S_ISREG, so directories (whose modes carry x bits
+    # too) never read as '*'. A stat failure degrades to no indicator --
+    # the path may have vanished under a live run, and a missing label must
+    # never cost the announcement.
     try:
         mode = os.lstat(path).st_mode
     except OSError:
