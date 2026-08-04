@@ -29,7 +29,9 @@ ALGO = "xxh3"
 
 def major_of(version: str) -> int:
     """Return the semver major component of a version string."""
-    return int(version.split(".", 1)[0])
+    # Everything before the first dot, as an int -- "10.20.30" -> 10.
+    major, _, _ = version.partition(".")
+    return int(major)
 
 
 # --- timestamps (ISO 8601 UTC, microsecond precision, 'Z' suffix) ---------
@@ -41,16 +43,22 @@ def iso_utc_ns(ns: int) -> str:
     Works from integer nanoseconds to avoid float rounding at the microsecond
     boundary, so two equal ``st_mtime_ns`` values always format identically.
     """
+    # Split into whole seconds and the sub-second remainder in integer math,
+    # then TRUNCATE the remainder to microseconds (never round: rounding
+    # could carry across the boundary and break comparison symmetry with a
+    # stored stamp).  Fixed 27-char width keeps lexicographic order = time
+    # order (CLAUDE.md "Timestamp precision").
     sec, nsec = divmod(ns, 1_000_000_000)
-    micro = nsec // 1000  # truncate ns -> us, the stored precision
     dt = datetime.fromtimestamp(sec, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{micro:06d}Z"
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{nsec // 1000:06d}Z"
 
 
 def now_iso() -> str:
     """Return the current time as a microsecond ISO UTC stamp."""
+    # datetime.now(utc) already carries microseconds; format them at the
+    # fixed six-digit width the schema requires.
     dt = datetime.now(timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond:06d}Z"
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{dt.microsecond:06d}Z"
 
 
 # --- (de)serialization ----------------------------------------------------
@@ -60,6 +68,9 @@ _REQUIRED_KEYS = ("version", "digests", "file_mtime", "hashed_at", "run_started_
 
 def build_meta(digests: dict[str, str], file_mtime: str, run_started_at: str) -> dict:
     """Assemble a fresh xattr document."""
+    # Exactly the five schema keys. The digests map is copied so the
+    # document never aliases caller state; hashed_at is stamped here, at
+    # build time; version is always the running software's own.
     return {
         "version": VERSION,
         "digests": dict(digests),
@@ -71,6 +82,8 @@ def build_meta(digests: dict[str, str], file_mtime: str, run_started_at: str) ->
 
 def dumps(meta: dict) -> bytes:
     """Serialize a metadata document to the UTF-8 JSON bytes stored in the xattr."""
+    # UTF-8 JSON per the schema; exact layout (key order, whitespace) is not
+    # contractual -- readers parse, they never compare bytes.
     return json.dumps(meta).encode("utf-8")
 
 
@@ -80,8 +93,14 @@ def loads(raw: bytes) -> dict:
     Raises ``ValueError`` if the bytes are not the expected JSON object shape, so
     callers can treat a malformed xattr the same as an absent one.
     """
+    # Non-UTF-8 bytes and invalid JSON already raise ValueError subclasses
+    # (UnicodeDecodeError, JSONDecodeError); the shape checks below fold the
+    # remaining malformations into the same contract, so callers need exactly
+    # one except clause to mean "no usable metadata".
     doc = json.loads(raw.decode("utf-8"))
-    if not isinstance(doc, dict) or any(k not in doc for k in _REQUIRED_KEYS):
+    if not isinstance(doc, dict):
+        raise ValueError("xattr is not a sumtag metadata document")
+    if any(key not in doc for key in _REQUIRED_KEYS):
         raise ValueError("xattr is not a sumtag metadata document")
     if not isinstance(doc["digests"], dict):
         raise ValueError("digests is not a map")

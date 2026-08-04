@@ -550,5 +550,102 @@ class OfflineTests(unittest.TestCase):
         self.assertIn("of unknown size", out)
 
 
+
+# --- Independent-oracle unit tests for the two 2026-07-22 helpers ----------
+# (re-code cycles 48-49; the rest of this module is flow-level by design)
+
+import socket as _socket
+
+from sumtag.dedupe import _ftype_indicator, _oserr
+
+
+class FtypeIndicatorTests(unittest.TestCase):
+    """The documented ls -F mapping (CLAUDE.md "Type indicators"): '@'
+    symlink, '/' directory, '*' executable file, '|' FIFO, '=' socket; a
+    plain file gets none; the symlink test comes first, so a link reads '@'
+    regardless of its target.  A stat failure also gets none -- the
+    live-tree-tolerance principle: a vanished path must degrade the label,
+    never crash the announcement.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = self._tmp.name
+
+    def _path(self, name: str) -> str:
+        return os.path.join(self.root, name)
+
+    def test_plain_file_gets_no_indicator(self):
+        p = self._path("plain")
+        with open(p, "w") as f:
+            f.write("x")
+        os.chmod(p, 0o644)
+        self.assertEqual(_ftype_indicator(p), "")
+
+    def test_executable_file_is_star(self):
+        p = self._path("tool")
+        with open(p, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(p, 0o755)
+        self.assertEqual(_ftype_indicator(p), "*")
+
+    def test_directory_is_slash(self):
+        p = self._path("d")
+        os.mkdir(p)
+        self.assertEqual(_ftype_indicator(p), "/")
+
+    def test_fifo_is_pipe(self):
+        p = self._path("fifo")
+        os.mkfifo(p)
+        self.assertEqual(_ftype_indicator(p), "|")
+
+    def test_socket_is_equals(self):
+        p = self._path("s")
+        try:
+            sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            self.addCleanup(sock.close)
+            sock.bind(p)
+        except OSError as e:   # e.g. sun_path length limit
+            self.skipTest(f"cannot bind a unix socket here: {e}")
+        self.assertEqual(_ftype_indicator(p), "=")
+
+    def test_symlink_wins_regardless_of_target(self):
+        # '@' for links to a plain file, an executable, a directory, and
+        # nothing at all -- lstat, never followed, tested first.
+        tgt_file = self._path("t1")
+        with open(tgt_file, "w") as f:
+            f.write("x")
+        tgt_exec = self._path("t2")
+        with open(tgt_exec, "w") as f:
+            f.write("x")
+        os.chmod(tgt_exec, 0o755)
+        tgt_dir = self._path("t3")
+        os.mkdir(tgt_dir)
+        for i, target in enumerate((tgt_file, tgt_exec, tgt_dir,
+                                    self._path("ghost"))):
+            link = self._path(f"link{i}")
+            os.symlink(target, link)
+            with self.subTest(target=os.path.basename(target)):
+                self.assertEqual(_ftype_indicator(link), "@")
+
+    def test_missing_path_degrades_to_no_indicator(self):
+        self.assertEqual(_ftype_indicator(self._path("nope")), "")
+
+
+class OserrTests(unittest.TestCase):
+    """A short human message for an OSError: the strerror when the errno
+    machinery provided one, else the exception's own str."""
+
+    def test_prefers_strerror(self):
+        exc = OSError(2, "No such file or directory", "/some/path")
+        self.assertEqual(_oserr(exc), "No such file or directory")
+
+    def test_falls_back_to_str_without_strerror(self):
+        exc = OSError("bare message")
+        self.assertIsNone(exc.strerror)
+        self.assertEqual(_oserr(exc), "bare message")
+
+
 if __name__ == "__main__":
     unittest.main()

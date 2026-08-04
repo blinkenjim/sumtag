@@ -101,10 +101,13 @@ else:  # Linux and other platforms: ismount() correctly sees device boundaries.
 
 def _walk_up_mount(abs_dir: str, ismount) -> str:
     """Walk up from a directory until ismount() reports a mount boundary."""
+    # Climb parents until one reports a mount boundary; the filesystem root
+    # (its own parent) is the terminal answer even if ismount never fires,
+    # so a pathological predicate cannot loop forever.
     cur = abs_dir
     while not ismount(cur):
         parent = os.path.dirname(cur)
-        if parent == cur:  # reached the filesystem root
+        if parent == cur:
             break
         cur = parent
     return cur
@@ -123,15 +126,20 @@ def _relativize(abs_path: str, mount: str) -> str:
     with ``samefile`` before trusting it, and only fall back to the (escaping)
     lexical form if the rebase doesn't point back at the same file.
     """
+    # The normal case: a non-escaping lexical relpath recomposes by
+    # construction and is the answer.
     rel = os.path.relpath(abs_path, mount)
-    if not (rel == os.pardir or rel.startswith(os.pardir + os.sep)):
-        return rel  # abs_path is genuinely under mount -- the normal case
+    if rel != os.pardir and not rel.startswith(os.pardir + os.sep):
+        return rel
+    # Escaping: try the firmlink rebase -- the whole rooted path replanted
+    # under the mount -- and trust it only if samefile proves it reaches the
+    # very same file. Otherwise the escaping form is all that is left.
     rebased = os.path.relpath(abs_path, "/")
     try:
         if os.path.samefile(os.path.join(mount, rebased), abs_path):
             return rebased
     except OSError:
-        pass
+        pass  # nothing at the rebased location; keep the lexical form
     return rel
 
 # A value is a DSN iff it matches scheme://… ; otherwise it is a SQLite file
@@ -242,6 +250,9 @@ class SQLiteStore:
 
     def ensure_mountpoint(self, path: str) -> int:
         """Return the id for a mount point, inserting it once if new."""
+        # One row per distinct mount path, minted once (INSERT OR IGNORE
+        # against the UNIQUE column) and cached: many files share a mount,
+        # so the common case is a dict hit, not a query.
         cached = self._mp_cache.get(path)
         if cached is not None:
             return cached
@@ -262,6 +273,13 @@ class SQLiteStore:
         ``None``, existing locate columns are preserved via COALESCE so a
         stat-less update never clobbers data written by a prior ``--locate`` run.
         """
+        # One statement, keyed on the location identity: INSERT the fresh
+        # row, or on conflict UPDATE it in place. The primary columns
+        # (inode, algo, digest, timestamps, version) always take the new
+        # values -- the single-digest replacement contract rides on algo/
+        # digest being overwritten. The locate columns COALESCE: a stat-less
+        # update (stat=None binds NULLs) keeps whatever a prior --locate
+        # wrote, while real stat data overwrites.
         sd = stat
         self._conn.execute(
             """
@@ -299,6 +317,10 @@ class SQLiteStore:
         Used by ``--locate`` in ``--import`` mode for files that lack a usable
         xattr but may already have a row from a previous stamping run.
         """
+        # A bare UPDATE: zero rows matched (no prior mirror row) is the
+        # documented no-op -- stat data alone never conjures a files row,
+        # because a row without a digest would violate the schema's NOT
+        # NULLs and mean nothing.
         self._conn.execute(
             """
             UPDATE files
@@ -321,6 +343,11 @@ class SQLiteStore:
         recursion: a vanished parent implies vanished children, and every
         child that held files is independently in this list.
         """
+        # Directories are DERIVED: the schema stores no directory table, so
+        # the distinct dirnames of the file rows under the prefix are the
+        # answer -- and because every directory that holds files appears
+        # here independently, --prune-dirs needs no recursion. An unknown
+        # mount matches nothing (the unmounted-drive guard's second half).
         row = self._conn.execute(
             "SELECT id FROM mountpoints WHERE path = ?",
             (mount_path,)).fetchone()
@@ -347,6 +374,10 @@ class SQLiteStore:
         equality, the same pattern as delete_dir_files), sorted. Used by
         --prune-all to check each resident file of a surviving directory.
         """
+        # Direct residents only -- dirname equality, expressed as "starts
+        # with dir_rel/ and has no further slash past the prefix" (or, at
+        # the mount root, no slash at all). The same shape delete_dir_files
+        # uses, so check and delete agree on what "resident" means.
         row = self._conn.execute(
             "SELECT id FROM mountpoints WHERE path = ?",
             (mount_path,)).fetchone()
@@ -372,13 +403,18 @@ class SQLiteStore:
         once per directory, so an interrupted run keeps completed prunes,
         same as delete_dir_files).
         """
+        # Exact rel_paths, deleted in slices of 500 bound parameters to stay
+        # well under SQLite's per-statement limit; unknown paths simply
+        # match nothing. One commit for the whole batch -- the caller
+        # (--prune-all) invokes this once per directory, preserving the
+        # per-directory commit contract.
         row = self._conn.execute(
             "SELECT id FROM mountpoints WHERE path = ?",
             (mount_path,)).fetchone()
         if row is None:
             return 0
         deleted = 0
-        CHUNK = 500  # stay well under SQLite's bound-parameter limit
+        CHUNK = 500
         for i in range(0, len(rel_paths), CHUNK):
             chunk = rel_paths[i:i + CHUNK]
             cur = self._conn.execute(
@@ -395,6 +431,12 @@ class SQLiteStore:
         Committed immediately, so an interrupted --prune-dirs keeps the
         prunes it completed.
         """
+        # The delete twin of iter_dir_file_paths: dirname equality, NEVER a
+        # recursive prefix delete -- a vanished child directory is its own
+        # candidate with its own check, and deleting beyond the residents
+        # here would strip rows a still-existing subdirectory owns.
+        # Committed immediately: one commit per directory is what keeps an
+        # interrupted prune's summary honest.
         row = self._conn.execute(
             "SELECT id FROM mountpoints WHERE path = ?",
             (mount_path,)).fetchone()
@@ -417,6 +459,9 @@ class SQLiteStore:
 
     def save_prescan_summary(self, s: PrescanSummary) -> None:
         """Store the prescan totals, replacing any previous summary (one per db)."""
+        # The fixed id=1 plus INSERT OR REPLACE is the one-row-ever rule:
+        # every save replaces the previous summary outright. List-valued
+        # context (roots, exclude) is stored as JSON text; booleans as 0/1.
         self._conn.execute(
             """
             INSERT OR REPLACE INTO prescan_summary
@@ -442,6 +487,11 @@ def open_store(value: str, mode: str = "rwc"):
     ``mode`` is passed through to the backend (see SQLiteStore): ``rwc``
     creates a missing database, ``rw``/``ro`` require an existing one.
     """
+    # scheme:// (slashes required) is a DSN dispatched by scheme; anything
+    # else -- including a bare "name:host" with no slashes -- is a SQLite
+    # file path, ':' being a perfectly legal filename character. Unknown
+    # schemes are recognized-and-rejected so a future backend can claim
+    # them without ever reinterpreting today's paths.
     if _SCHEME_RE.match(value):
         scheme, _, rest = value.partition("://")
         if scheme == "sqlite":
@@ -461,6 +511,12 @@ def read_prescan_summary(value: str) -> PrescanSummary | None:
     --database first" error. Non-SQLite DSNs raise NotImplementedError,
     matching open_store.
     """
+    # Same value grammar as open_store (foreign schemes rejected, sqlite://
+    # unwrapped, else a plain path), then a strictly read-only open: a
+    # missing database must never be created as a byproduct (--db-prescan
+    # composes with -n, whose contract is no side effects anywhere). Every
+    # flavor of absence -- no file, no table, no row -- is None; the caller
+    # turns that into the hard run---prescan-first error.
     if _SCHEME_RE.match(value):
         scheme, _, rest = value.partition("://")
         if scheme != "sqlite":
@@ -478,7 +534,7 @@ def read_prescan_summary(value: str) -> PrescanSummary | None:
               FROM prescan_summary WHERE id = 1
             """).fetchone()
         conn.close()
-    except sqlite3.OperationalError:  # file absent/unopenable or table absent
+    except sqlite3.OperationalError:
         return None
     if row is None:
         return None
@@ -497,6 +553,11 @@ def mount_relative(path, ismount=os.path.ismount) -> tuple[str, str]:
     other platforms (and as a fallback if statfs fails) it comes from walking
     up with ``ismount`` (injectable for testing) until a mount boundary.
     """
+    # abspath, never realpath: rel_paths are recorded from paths as the
+    # user spelled them (the path-discipline contract dedupe leans on).
+    # statfs answers directly where available (macOS, where ismount is
+    # blind to firmlinks); otherwise the ismount walk starts from the
+    # containing DIRECTORY -- ismount on a file is meaningless.
     ap = os.path.abspath(path)
     start = ap if os.path.isdir(ap) else os.path.dirname(ap)
     mount = _mount_point(ap) or _walk_up_mount(start, ismount)

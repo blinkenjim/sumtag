@@ -38,11 +38,17 @@ def hash_file(path, algo: str | None = None,
     (not as a default-argument value) so changing that constant takes effect
     without needing to re-import this module.
     """
+    # Resolve the algorithm at CALL time (never as a default-argument value)
+    # so flipping schema.ALGO redirects everything downstream immediately;
+    # an unknown name is a ValueError, not a KeyError leak.
     algo = algo if algo is not None else schema.ALGO
     try:
         factory = _HASHERS[algo]
     except KeyError:
         raise ValueError(f"unsupported digest algorithm: {algo!r}") from None
+    # Fixed-size chunked reads: bounded memory whatever the file size. The
+    # progress callback sees the cumulative byte count after each chunk --
+    # exactly what a within-file indicator needs.
     h = factory()
     read = 0
     with open(path, "rb") as f:

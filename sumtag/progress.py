@@ -127,22 +127,30 @@ def human_size(n: float, si: bool) -> str:
     units = _SI_UNITS if si else _BINARY_UNITS
     value = float(n)
     idx = 0
+    # Promote to the next unit at each power of the base; the table's last
+    # entry (PiB/PB) never promotes -- the mantissa just grows past it.
     while value >= base and idx < len(units) - 1:
         value /= base
         idx += 1
     if idx == 0:
-        return f"{int(value)}{units[idx]}"
+        return f"{int(value)}{units[0]}"  # whole bytes, no decimal
     text = f"{value:.1f}"
     if len(text) > len("999.9"):
-        # A four-digit mantissa (binary units cover 1000.0-1023.9 before
-        # promoting, e.g. a DVD VOB's 1023.8MiB) would overflow the fixed
-        # field widths and wrap the progress line; drop the decimal instead.
+        # The four-digit-mantissa rule (fixed 2026-07-19): binary units
+        # cover 1000.0-1023.9 before promoting (a DVD VOB's 1023.8MiB), and
+        # a four-digit mantissa with a decimal would overflow the fixed
+        # size/rate field budgets and wrap the progress line. Drop the
+        # decimal instead -- checked on the FORMATTED text, so a value that
+        # .1f rounds up to "1000.0" is caught too.
         text = f"{value:.0f}"
     return text + units[idx]
 
 
 def _format_elapsed(seconds: float) -> str:
     """Render elapsed time as H:MM:SS."""
+    # Whole seconds only, truncated: a stopwatch never shows a second that
+    # hasn't fully passed. Hours are unpadded (a fact can be any width);
+    # minutes and seconds are clock-padded to two digits.
     total = int(seconds)
     h, rem = divmod(total, 3600)
     m, s = divmod(rem, 60)
@@ -155,19 +163,26 @@ def _format_eta(seconds: float) -> str:
     Deliberately distinct from elapsed's clock style, since one is a fact
     and the other an estimate (CLAUDE.md "Line format").
     """
+    # The three documented forms -- 45s / 5m12s / 1h05m -- switching at the
+    # minute and hour marks. Trailing components are zero-padded to two
+    # digits (the doc's own "1h05m"); the leading one is not. No day unit:
+    # hours just grow.
     total = int(seconds)
     if total < 60:
         return f"{total}s"
     if total < 3600:
         m, s = divmod(total, 60)
         return f"{m}m{s:02d}s"
-    h, rem = divmod(total, 3600)
-    m = rem // 60
+    h, m = divmod(total // 60, 60)
     return f"{h}h{m:02d}m"
 
 
 def _render_bar(frac: float, width: int) -> str:
     """Render a pv-style bar: '=' fill, '>' leading edge, spaces remaining."""
+    # Clamp defensively (a rate hiccup must never tear the bar), round the
+    # fill boundary to the nearest cell, and spend the last filled cell on
+    # the '>' edge -- except at the extremes: an empty bar leads with the
+    # edge alone, a full bar is a solid wall with nothing left to lead.
     frac = min(max(frac, 0.0), 1.0)
     filled = int(round(frac * width))
     if filled <= 0:

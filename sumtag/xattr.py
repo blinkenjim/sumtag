@@ -47,6 +47,11 @@ if _IS_MACOS:
         raise OSError(err, os.strerror(err), path)
 
     def get(path, name: str) -> bytes | None:
+        # Two-call protocol: a NULL buffer asks for the value's size, then a
+        # sized buffer fetches it. ENOATTR is the absent case (None); any
+        # other negative return is a real error. The value can shrink
+        # between the calls (unlikely but legal), so trust the second
+        # call's byte count, not the first's.
         p, n = os.fsencode(path), name.encode()
         size = _libc.getxattr(p, n, None, 0, 0, 0)
         if size < 0:
@@ -60,6 +65,9 @@ if _IS_MACOS:
         return buf.raw[:got]
 
     def set(path, name: str, value: bytes) -> None:  # noqa: A001 - mirrors os.setxattr
+        # One call: setxattr with options 0 creates or replaces outright.
+        # value is bytes end to end -- len() is its byte count, and ctypes
+        # passes the buffer verbatim (embedded NULs included).
         p, n = os.fsencode(path), name.encode()
         if _libc.setxattr(p, n, value, len(value), 0, 0) < 0:
             _raise_errno(str(path))
@@ -70,6 +78,9 @@ if _IS_MACOS:
 
     def remove(path, name: str) -> bool:
         """Delete the attribute; return whether it was present to delete."""
+        # ENOATTR means there was nothing to delete -- that is a report
+        # (False), not an error; any other failure raises. True means the
+        # attribute existed and is now gone.
         p, n = os.fsencode(path), name.encode()
         if _libc.removexattr(p, n, 0) < 0:
             if ctypes.get_errno() == _ENOATTR:

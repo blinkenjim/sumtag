@@ -607,6 +607,9 @@ def sig_digest(files) -> Counter:
     Digests only compare within one algorithm (the mixed-algorithm hazard,
     CLAUDE.md Database storage), so the tuples carry algo alongside digest.
     """
+    # One (algo, digest) entry per file -- algo rides along because digests
+    # only mean "same bytes" within one algorithm (the mixed-algo hazard).
+    # A Counter, not a set: repetition is part of a directory's identity.
     return Counter((r["algo"], r["digest"]) for r in files)
 
 
@@ -616,6 +619,9 @@ def sig_name_digest(files) -> Counter:
     All-or-nothing per file: a byte-identical file under a different name
     matches nothing here.
     """
+    # The file's own name (basename -- the directory prefix is the dir's
+    # identity, not the file's) bound to its content: a rename breaks the
+    # tuple, which is exactly this function's all-or-nothing semantics.
     return Counter((os.path.basename(r["rel_path"]), r["algo"], r["digest"])
                    for r in files)
 
@@ -630,8 +636,12 @@ def _multiset_jaccard(a: Counter, b: Counter) -> tuple[float, int]:
     A fully renamed copy still scores 1.0 under sig_digest -- filenames were
     never in its signature.
     """
+    # Counter & and | are multiset intersection (elementwise min) and union
+    # (elementwise max); their totals give |A & B| / |A | B| directly. The
+    # empty-vs-empty case is defined as identical (1.0) before the division
+    # can trip on a zero union; the intersection size doubles as matched.
     if not a and not b:
-        return 1.0, 0  # two empty directories have identical (empty) contents
+        return 1.0, 0
     inter = sum((a & b).values())
     union = sum((a | b).values())
     return inter / union, inter
@@ -661,16 +671,20 @@ def max_identical(n_a: int, n_b: int, n_matched: int) -> int:
     likely the directories are dissimilar anyway, so the imperfection is
     self-limiting.
     """
+    # Identical directories of n files score exactly 3n, so dividing by
+    # 3*max keeps "1.0 means identical contents" true by construction.
     return 3 * max(n_a, n_b)
 
 
 def max_smaller(n_a: int, n_b: int, n_matched: int) -> int:
     """Max achievable given the sizes: 3 * min(|A|, |B|). Subset scores 1.0."""
+    # The most the smaller side could contribute: a perfect subset tops out.
     return 3 * min(n_a, n_b)
 
 
 def max_matched(n_a: int, n_b: int, n_matched: int) -> int:
     """Max given the names that matched: 3 * n_matched. Loosest of the three."""
+    # Only the names that DID match set the bar -- the loosest denominator.
     return 3 * n_matched
 
 
@@ -683,6 +697,9 @@ MAX_SCORES = {
 
 def sig_names(files) -> dict:
     """Signature: basename -> (algo, digest); basenames are unique in a dir."""
+    # basename -> (algo, digest). A plain dict is safe because basenames
+    # are unique within one directory -- which is also what collapses the
+    # name-anchored comparison to a 1:1 match on name.
     return {os.path.basename(r["rel_path"]): (r["algo"], r["digest"])
             for r in files}
 
@@ -692,12 +709,13 @@ def make_name_score(max_fn):
     Returns (similarity, matched); matched here is the shared-basename count
     -- this function's own notion of a file in common."""
     def score(a: dict, b: dict) -> tuple[float, int]:
+        # 1 point per shared basename; +2 more when its (algo, digest)
+        # tuple agrees exactly -- tuple equality is what refuses to compare
+        # digests across algorithms (name point only; never guess about
+        # content). 3 points is a perfect pair.
         matched = a.keys() & b.keys()
-        points = len(matched)          # 1 point per shared basename
+        points = len(matched)
         for name in matched:
-            # Tuple equality requires same algo AND digest: a pair stamped
-            # under different algorithms is incomparable, so it earns the
-            # name point only -- we never guess about content.
             if a[name] == b[name]:
                 points += 2
         denom = max_fn(len(a), len(b), len(matched))
@@ -782,6 +800,11 @@ def _kept_index(sigs: dict, max_df: int) -> dict:
     a token in k dirs witnesses k*(k-1)/2 candidate pairs, so one
     .DS_Store-grade token would reinstate the all-pairs blowup by itself.
     """
+    # Invert: every signature key -> the dirs carrying it. Then keep only
+    # keys in 2..max_df dirs: a singleton key can nominate no pair, and a
+    # key past the cap is ubiquitous noise (k dirs witness k*(k-1)/2
+    # candidates -- one .DS_Store-grade key would reinstate the all-pairs
+    # blowup by itself). Sorted ids give deterministic scoring order.
     index: dict = {}
     for d, sig in sigs.items():
         for tok in sig.keys():
@@ -798,6 +821,9 @@ def _candidate_partners(index: dict, sig, d: int) -> list:
     ordering makes each unordered pair the responsibility of exactly one
     outer directory, mirroring the exhaustive triangular loop.
     """
+    # Union the postings of every key d carries, keep only ids AFTER d
+    # (each unordered pair is exactly one outer dir's responsibility, the
+    # triangular-loop mirror), dedup via the set, sort for determinism.
     partners: set = set()
     for tok in sig.keys():
         ds = index.get(tok)

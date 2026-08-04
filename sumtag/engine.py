@@ -81,8 +81,12 @@ class _Reporter:
 
 def _stat_data(st: os.stat_result) -> StatData:
     """Build a StatData from an os.stat_result, handling platform differences."""
+    # Straight st_* mapping into the locate columns; times go through the
+    # schema's ns formatter. birthtime exists only where the platform
+    # provides it (macOS) -- and only as a float of seconds, so it is
+    # scaled to ns before formatting; None elsewhere maps to a NULL column.
     birthtime = None
-    if hasattr(st, "st_birthtime"):  # macOS
+    if hasattr(st, "st_birthtime"):
         birthtime = schema.iso_utc_ns(int(st.st_birthtime * 1_000_000_000))
     return StatData(
         size=st.st_size,
@@ -99,6 +103,9 @@ def _stat_data(st: os.stat_result) -> StatData:
 
 def _read_meta(path: str) -> dict | None:
     """Return the parsed sumtag xattr, or None if absent/unreadable/malformed."""
+    # The absent/unreadable/malformed collapse: whatever the failure --
+    # no attribute, bad bytes, wrong shape -- the decision layer sees None
+    # ("no usable metadata"), one except clause wide.
     raw = xattr.get(path, schema.XATTR_NAME)
     if raw is None:
         return None
@@ -203,6 +210,8 @@ def _normalized_roots(roots) -> list[str]:
     """Scan roots as a sorted, deduplicated list of absolute paths -- the
     stored/compared form, so /data vs /data/ vs a relative spelling of the
     same directory never reads as a roots mismatch."""
+    # abspath (not realpath -- same path discipline as everywhere), set for
+    # dedup, sorted for a canonical comparable form.
     return sorted({os.path.abspath(r) for r in roots})
 
 
@@ -210,6 +219,10 @@ def _summary_mismatch(summary, args) -> str | None:
     """Why the stored prescan summary doesn't answer this run's question,
     or None if it matches. Every field that changes which files get counted
     participates (CLAUDE.md "--db-prescan": match-or-error, full context)."""
+    # One check per field that changed which files got counted, each named
+    # with its documented wording. Roots compare as normalized sets (a
+    # respelling is not a mismatch); exclude patterns compare sorted (order
+    # never changed what was counted).
     if _normalized_roots(summary.roots) != _normalized_roots(args.directories):
         return "different scan roots"
     if summary.sum_mode != bool(args.sum):
@@ -294,11 +307,15 @@ def _hash_decision(meta, live: str, args, current_major: int,
     counter shown during the real pass won't line up with what --prescan
     predicted.
     """
+    # Standard mode (--sum) delegates to the re-hash rules. Import/locate-
+    # only mode never computes -- that refusal is the mode's whole point --
+    # unless --force, the flag whose job is overriding defaults about what
+    # gets (re-)computed.
     if use_standard_decision:
         return decide.should_rehash(meta, live, args.force, current_major)
-    rehash = args.force
-    reason = "forced" if args.force else "not computing (--import/--locate only)"
-    return rehash, reason
+    if args.force:
+        return True, "forced"
+    return False, "not computing (--import/--locate only)"
 
 
 def _prescan_stamp(roots, args, rep: _Reporter) -> tuple[int, int]:
@@ -370,6 +387,9 @@ def _pct(done: float, total: float) -> str:
     (--db-prescan drift can push past 100%; that line simply widens,
     harmless in an appended log.)
     """
+    # Zero total reads as complete (the progress-bar convention); the >3
+    # width keeps (  0%) through (100%) one token wide, and drift past 100
+    # simply widens -- harmless in an appended log.
     frac = (done / total) if total else 1.0
     return f"({frac * 100:>3.0f}%)"
 
@@ -377,6 +397,9 @@ def _pct(done: float, total: float) -> str:
 def _prescan_prefix(index: int, total_count: int, bytes_so_far: int,
                     total_bytes: int, si: bool) -> str:
     """Render --prescan's "nnn/mmm (pp%)  so-far/total (pp%)  " prefix."""
+    # nnn zero-padded to mmm's width keeps the column aligned as the count
+    # climbs; each fraction carries its percentage token; two-space
+    # separators, including the trailing one before the announcement.
     width = len(str(total_count)) if total_count else 1
     so_far_h = progress_mod.human_size(bytes_so_far, si)
     total_h = progress_mod.human_size(total_bytes, si)
