@@ -163,14 +163,17 @@ def _format_eta(seconds: float) -> str:
     Deliberately distinct from elapsed's clock style, since one is a fact
     and the other an estimate (CLAUDE.md "Line format").
     """
+    # The three documented forms -- 45s / 5m12s / 1h05m -- switching at the
+    # minute and hour marks. Trailing components are zero-padded to two
+    # digits (the doc's own "1h05m"); the leading one is not. No day unit:
+    # hours just grow.
     total = int(seconds)
     if total < 60:
         return f"{total}s"
     if total < 3600:
         m, s = divmod(total, 60)
         return f"{m}m{s:02d}s"
-    h, rem = divmod(total, 3600)
-    m = rem // 60
+    h, m = divmod(total // 60, 60)
     return f"{h}h{m:02d}m"
 
 
