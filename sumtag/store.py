@@ -374,6 +374,10 @@ class SQLiteStore:
         equality, the same pattern as delete_dir_files), sorted. Used by
         --prune-all to check each resident file of a surviving directory.
         """
+        # Direct residents only -- dirname equality, expressed as "starts
+        # with dir_rel/ and has no further slash past the prefix" (or, at
+        # the mount root, no slash at all). The same shape delete_dir_files
+        # uses, so check and delete agree on what "resident" means.
         row = self._conn.execute(
             "SELECT id FROM mountpoints WHERE path = ?",
             (mount_path,)).fetchone()
