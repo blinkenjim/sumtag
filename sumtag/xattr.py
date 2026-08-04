@@ -65,6 +65,9 @@ if _IS_MACOS:
         return buf.raw[:got]
 
     def set(path, name: str, value: bytes) -> None:  # noqa: A001 - mirrors os.setxattr
+        # One call: setxattr with options 0 creates or replaces outright.
+        # value is bytes end to end -- len() is its byte count, and ctypes
+        # passes the buffer verbatim (embedded NULs included).
         p, n = os.fsencode(path), name.encode()
         if _libc.setxattr(p, n, value, len(value), 0, 0) < 0:
             _raise_errno(str(path))
