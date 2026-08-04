@@ -20,6 +20,9 @@ IGNORE_MARKER = "@sumtag-ignore"
 def _name_key(name: str) -> tuple[str, str]:
     """Case-insensitive sort key; the raw name breaks case-only ties so the
     order stays deterministic ('Readme' vs 'readme')."""
+    # Primary: the casefolded name (Finder-style, case-insensitive).
+    # Secondary: the raw name, so case-only twins order deterministically
+    # and the key stays total (distinct names never compare equal).
     return (name.casefold(), name)
 
 
