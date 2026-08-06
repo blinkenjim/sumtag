@@ -227,17 +227,32 @@ OPTIONS
               subtree -- so a database that mirrors several drives can be
               pruned one drive at a time while the others sit unplugged. The
               database itself must already exist; it is never created by this
-              option. A directory deleted from the filesystem but moved
-              elsewhere is pruned at its old location like any other deletion;
-              files deleted from a directory that still exists are not noticed
-              (that is --prune-all's job). Combined with --dry-run, previews
-              what would be pruned without deleting anything. With --progress,
-              a live nnn/mmm counter reports directories checked against the
-              total known at the start.  Requires --database.  Cannot be
-              combined with --sum, --import, --locate, --verify, --remove,
-              --force, --prescan, --db-prescan, --exclude, or --no-ignore (the
-              last two govern filesystem traversal, and this option walks the
-              database, not the filesystem). See EXIT STATUS below.
+              option. A vanished directory whose recorded files reappear
+              elsewhere on the same filesystem -- agreeing on inode, name,
+              and recorded modification time, all three -- is recognized as
+              moved (or renamed) and its rows are rewritten in place under
+              the new path, preserving their digests, timestamps, and stat
+              columns, instead of being deleted. Each vanished directory's
+              own parent is checked first, so a rename in place costs one
+              directory read; only if unmatched vanished directories remain
+              does an announced walk of the roots hunt for arbitrary
+              relocation. The walk honors @sumtag-ignore markers and
+              --exclude patterns like every traversal (which is why those
+              flags now compose with the prune options). Anything short of
+              full agreement -- a file deleted, renamed, or modified since
+              the move -- falls back to the ordinary prune, and a later scan
+              of the new location re-adds the rows; hard-link farms that
+              make the evidence ambiguous are refused loudly, rows kept,
+              exit status 2. Files deleted from a directory that still
+              exists are not noticed (that is --prune-all's job). Combined
+              with --dry-run, previews what would be pruned without deleting
+              anything. With --progress, a live nnn/mmm counter reports
+              directories checked against the total known at the start.
+              Requires --database.  Cannot be combined with --sum, --import,
+              --locate, --verify, --remove, --force, --prescan, or
+              --db-prescan.  --exclude and --no-ignore are honored: they
+              govern the move-detection candidate walk. See EXIT STATUS
+              below.
 
        --prune-all
               Everything --prune-dirs does, and additionally check every file
@@ -247,9 +262,10 @@ OPTIONS
               link is not the stamped file). The directory pass runs first, so
               a vanished directory still costs a single stat(2), never one per
               resident row; the extra cost over --prune-dirs is one lstat(2)
-              per row in surviving directories only. A moved file is pruned at
-              its old location like any deletion; nothing content-based is
-              checked -- no hashing, ever. Same requirements, conflicts,
+              per row in surviving directories only. An individually moved
+              file is pruned at its old location like any deletion (only
+              whole directories are matched to new locations); nothing
+              content-based is checked -- no hashing, ever. Same requirements, conflicts,
               previews, progress counter (the unit becomes paths: directories
               plus file rows), and exit status as --prune-dirs; giving both
               together is redundant but not an error.
@@ -296,7 +312,8 @@ RUN SUMMARY
        (suppressed by -q): the number of files the mode processed and their
        cumulative size (headlined hashed, would hash, imported, verified,
        removed, or pruned to match the mode; pruned counts directories and
-       file rows, followed by a checked line with the total directories
+       file rows, with a moved line when move detection rewrote any rows in
+       place, followed by a checked line with the total directories
        examined -- under --prune-all, files too), any nonzero skipped, errors,
        CORRUPT, stale, or unverifiable counts, the database in use (when
        --database was given), and the scanned directories. Byte figures honour
@@ -322,8 +339,10 @@ EXIT STATUS
        With --prune-dirs or --prune-all, the same scheme, applied to
        staleness: 0 means nothing was stale (the database already matches the
        filesystem), 1 means stale directories or file rows were found and
-       pruned (or would be pruned, under --dry-run), and 2 means errors
-       prevented a complete check (including a missing scan root or database).
+       pruned or moved (or would be, under --dry-run), and 2 means errors
+       prevented a complete check (including a missing scan root or database,
+       and a vanished directory whose new location is ambiguous -- its rows
+       are kept, unresolved).
 
        In any mode, a run interrupted by Ctrl-C exits 130 (see RUN SUMMARY).
 

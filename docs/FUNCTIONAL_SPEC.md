@@ -385,10 +385,12 @@ argparse), *except* the `--progress`/`-q` rule (REQ-CLI-14), which is resolved b
   `--locate`, `--verify`, `--force`. `--remove -n` is **allowed** (the preview).
 - **REQ-CLI-11** — `--prune-dirs` / `--prune-all` each require `--database`; each conflicts
   with `--sum`, `--import`, `--locate`, `--verify`, `--remove` (one run, one mode), with
-  `--force` (no re-hash decision to override), with `--prescan`/`--db-prescan` (nothing is
-  checksummed; the prune counter is built in), and with `--exclude`/`--no-ignore` (they
-  walk the database, not the filesystem). `-n` is allowed. Giving **both** prune flags is
-  redundant but allowed (`--prune-all` subsumes `--prune-dirs`).
+  `--force` (no re-hash decision to override), and with `--prescan`/`--db-prescan` (nothing
+  is checksummed; the prune counter is built in). `--exclude`/`--no-ignore` **compose**
+  with the prune flags (changed 2026-08-05: move detection's candidate search traverses,
+  and traversal-level exclusions apply wherever traversal happens). `-n` is allowed.
+  Giving **both** prune flags is redundant but allowed (`--prune-all` subsumes
+  `--prune-dirs`).
 - **REQ-CLI-12** — `--prescan` conflicts with `--remove` (nothing to count).
 - **REQ-CLI-13** — `--db-prescan` requires `--database`, conflicts with `--prescan` (two
   sources for one counter) and `--remove`. It cannot combine with `--verify` because
@@ -506,7 +508,8 @@ no longer exist.
   and contributes nothing (a drive mounted somewhere unexpected simply matches no rows).
 - **REQ-PRUNE-4** (directory check) — For each candidate directory (sorted), `stat` it. It
   is "gone" if it does not exist or is no longer a directory. A surviving directory is a
-  `-v`-gated `skip   <path> (exists)`. A gone directory: under `-n`,
+  `-v`-gated `skip   <path> (exists)`. A gone directory first goes through **move
+  detection** (REQ-PRUNE-11..13); only if unmatched: under `-n`,
   `would prune <path> (<N> file rows)`; live, delete its **resident** rows (dirname
   equality, never recursive) and print `prune  <path> (<N> file rows)`. Count `pruned_dirs`
   and add the rows to `pruned_files`; count `checked_dirs`.
@@ -524,7 +527,30 @@ no longer exist.
 - **REQ-PRUNE-8** (never touches the filesystem) — No file or xattr is ever modified; this is
   maintenance *of* the sink toward filesystem truth. The sink-never-a-source principle holds.
 - **REQ-PRUNE-9** (exit codes) — `0` = nothing stale (database already matches); `1` = stale
-  found and pruned (or would-prune under `-n`); `2` = errors prevented a complete check.
+  found and pruned **or moved** (or would-be under `-n`); `2` = errors prevented a complete
+  check, including an ambiguous move (REQ-PRUNE-13).
+- **REQ-PRUNE-11** (move detection — matching; added 2026-08-05) — Before pruning, each
+  vanished directory is matched against candidate directories holding **zero** database
+  rows: lost L matches candidate F iff **every** resident row of L has a regular-file
+  child of F agreeing on all three of **(inode, basename, file_mtime to the stored
+  microsecond)**. The subset direction tolerates files added after the move; anything
+  deleted, renamed, or modified since breaks the match (fallback: ordinary prune, rescan
+  re-adds). Candidates on a different filesystem than the mount are rejected (`rename(2)`
+  cannot cross devices; inodes only compare within one). A match rewrites the resident
+  rows' `rel_path` in place — digests, timestamps, locate columns, and `mountpoint_id`
+  all preserved — announced `move <old> -> <new> (<N> file rows)` (`would move` under
+  `-n`, which changes nothing); the summary gains a `moved:` line. A moved tree resolves
+  directory by directory (non-recursive composition, as everywhere in the prune family).
+- **REQ-PRUNE-12** (move detection — tiers) — Candidates are found in two tiers: each lost
+  directory's own **parent** first (one `readdir`; renames-in-place resolve here), then,
+  **only if unmatched lost directories remain**, a tree-wide walk of the roots, announced
+  (`N vanished directories unmatched; walking roots to check for moves`). The walk uses
+  the shared walker, so `@sumtag-ignore` and `--exclude` govern the candidate search;
+  after the walk the whole candidate pool is re-resolved (stricter, never looser).
+- **REQ-PRUNE-13** (move detection — ambiguity) — One lost directory matching several
+  candidates, or several lost directories claiming one candidate (hard-link farms), is
+  refused: a stderr warning, rows kept, nothing pruned there, and exit `2` (the check was
+  knowingly incomplete). Never a guess.
 - **REQ-PRUNE-10** (progress unit) — With `--progress`, a live counter shows directories (or,
   under `--prune-all`, directories + file rows as `paths`) checked out of the total known at
   start (Part VI / CountIndicator).
