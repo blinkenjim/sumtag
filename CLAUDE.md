@@ -574,3 +574,7 @@ The typical resume flow after an interrupted big run: the original `sumtag --sum
 `-q` and `-v` use `action='count'` in argparse, so `-vv` and `-v -v` are equivalent.
 
 Short forms are deliberately limited to the four frequently-typed flags — `-n`, `-q`, `-v`, `-f`. The rest (`--progress`, `--database`, `--sum`, `--import`, `--verify`, `--no-ignore`, `--exclude`, `--locate`, `--si`, `--remove`, `--prescan`, `--db-prescan`) are **long-only by design**: most are rare, deliberate operations where spelling out the name is a feature, not friction. (`--verify` would also collide awkwardly with `-v`/verbose.) This is a settled choice, not an oversight.
+
+# Development Notes for Claude (not part of the design)
+
+Claude should never just go off and begin implementing anything until I give the go-ahead.
