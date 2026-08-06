@@ -408,4 +408,213 @@ def catalog() -> list[Scenario]:
         check=check_locate_fills_existing_row,
     ))
 
+    # --- 2026-08-05 extension: the features added after the original catalog
+    # (TODO.md "Extend the conformance harness") -------------------------------
+
+    # 18. --remove strips the stamp from a stamped file.
+    def check_remove(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        k.expect(not s.present, "--remove should strip the user.sumtag xattr")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="remove_strips_stamps",
+        description="--remove deletes the xattr from a stamped file.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("valid"))]),
+        argv=["--remove"],
+        check=check_remove,
+    ))
+
+    # 19. --remove -n previews without touching anything. (Inaction -> green.)
+    def check_remove_dryrun(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        k.expect(s.present, "--remove -n must leave the xattr in place")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="remove_dry_run_preserves",
+        description="--remove -n previews; the stamp survives.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("valid"))]),
+        argv=["--remove", "-n"],
+        check=check_remove_dryrun,
+    ))
+
+    # 20. A --remove conflict is a CLI error before anything is touched
+    #     (representative of the conflict family; the unit suite covers the
+    #     whole matrix).
+    def check_remove_conflict(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        k.expect(res.exit_code == 2,
+                 f"conflicting flags should exit 2, got {res.exit_code}")
+        k.expect(s.present, "a rejected run must not touch the xattr")
+
+    scenarios.append(Scenario(
+        name="remove_verify_conflict_is_cli_error",
+        description="--remove --verify is rejected at the CLI, exit 2.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256,
+                                      prestamp=PreStamp("valid"))]),
+        argv=["--remove", "--verify"],
+        check=check_remove_conflict,
+    ))
+
+    # 21. The mandatory-action model: a bare `sumtag <dir>` is a CLI error.
+    def check_no_action(root, res, k):
+        s = oracle.inspect(root / "data.bin")
+        k.expect(res.exit_code == 2,
+                 f"a run naming no action should exit 2, got {res.exit_code}")
+        k.expect(not s.present, "a rejected run must not stamp anything")
+
+    scenarios.append(Scenario(
+        name="missing_action_is_a_cli_error",
+        description="A run naming no action flag is rejected, exit 2.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),
+        argv=[],
+        check=check_no_action,
+    ))
+
+    # 22. --verify on a file with no usable xattr: unverifiable, exit 2
+    #     (errors prevented a complete check -- distinct from corruption's 1).
+    def check_unverifiable(root, res, k):
+        k.expect(res.exit_code == 2,
+                 f"unverifiable should exit 2, got {res.exit_code}")
+        k.expect("unverifiable" in res.stdout,
+                 "the unverifiable file should be reported by label")
+
+    scenarios.append(Scenario(
+        name="verify_unverifiable_exit_2",
+        description="--verify reports an unstamped file as unverifiable, exit 2.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=256)]),  # no prestamp
+        argv=["--verify"],
+        check=check_unverifiable,
+    ))
+
+    # 23. --no-ignore processes a marked directory the plain run would prune
+    #     (the marker file itself is still never stamped).
+    def check_no_ignore(root, res, k):
+        s = oracle.inspect(root / "vendor" / "blob.bin")
+        k.expect(s.present and s.digest_matches_content,
+                 "--no-ignore should stamp inside the marked directory")
+        marker = oracle.inspect(root / "vendor" / "@sumtag-ignore")
+        k.expect(not marker.present, "the marker file itself is never stamped")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="no_ignore_overrides_marker",
+        description="--no-ignore disregards @sumtag-ignore and stamps the subtree.",
+        corpus=Corpus(files=[FileSpec("vendor/blob.bin", size=256)],
+                      ignore_dirs=["vendor"]),
+        argv=["--sum", "--no-ignore"],
+        check=check_no_ignore,
+    ))
+
+    # 24. --exclude skips matching basenames and prunes matching directories.
+    def check_exclude(root, res, k):
+        k.expect(oracle.inspect(root / "keep.txt").present,
+                 "an unmatched file should be stamped")
+        k.expect(not oracle.inspect(root / "movie.vob").present,
+                 "a file matching --exclude '*.vob' must not be stamped")
+        k.expect(not oracle.inspect(root / "VIDEO_TS" / "inner.txt").present,
+                 "a directory matching --exclude is pruned whole")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="exclude_prunes_by_basename",
+        description="--exclude skips matching files and prunes matching directories.",
+        corpus=Corpus(files=[FileSpec("keep.txt", size=64),
+                             FileSpec("movie.vob", size=64),
+                             FileSpec("VIDEO_TS/inner.txt", size=64)]),
+        argv=["--sum", "--exclude", "*.vob", "--exclude", "VIDEO_TS"],
+        check=check_exclude,
+    ))
+
+    # 25. --prescan counts exactly the files the run will hash (the valid
+    #     prestamp is excluded from mmm) and prefixes each announcement.
+    #     Sizes are fixed (64+64) so the whole prefix is predictable.
+    def check_prescan(root, res, k):
+        k.expect("1/2 ( 50%)  0B/128B (  0%)" in res.stdout,
+                 f"first counter prefix missing from: {res.stdout!r}")
+        k.expect("2/2 (100%)  64B/128B ( 50%)" in res.stdout,
+                 "second counter prefix missing")
+        k.expect("3/" not in res.stdout,
+                 "the up-to-date file must not be counted or prefixed")
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="prescan_counts_only_what_will_hash",
+        description="--prescan's mmm mirrors the re-hash decision; prefixes match.",
+        corpus=Corpus(files=[FileSpec("a.bin", size=64),
+                             FileSpec("b.bin", size=64),
+                             FileSpec("z-done.bin", size=64,
+                                      prestamp=PreStamp("valid"))]),
+        argv=["--sum", "--prescan"],
+        check=check_prescan,
+    ))
+
+    # 26. --prescan with --remove is a CLI error (nothing to count).
+    def check_prescan_remove(root, res, k):
+        k.expect(res.exit_code == 2,
+                 f"--prescan --remove should exit 2, got {res.exit_code}")
+
+    scenarios.append(Scenario(
+        name="prescan_remove_conflict_is_cli_error",
+        description="--prescan cannot combine with --remove; exit 2.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=64)]),
+        argv=["--remove", "--prescan"],
+        check=check_prescan_remove,
+    ))
+
+    # 27. --db-prescan consumes the totals a --prescan --database run stored.
+    def check_db_prescan(root, res, k):
+        k.expect(res.exit_code == 0, f"expected exit 0, got {res.exit_code}")
+        k.expect("using stored prescan totals: 2 files" in res.stdout,
+                 f"stored-totals announcement missing from: {res.stdout!r}")
+
+    scenarios.append(Scenario(
+        name="db_prescan_uses_stored_totals",
+        description="--db-prescan reads mmm/bytes from the stored summary.",
+        corpus=Corpus(files=[FileSpec("a.bin", size=64),
+                             FileSpec("b.bin", size=64)]),
+        extra_runs=[["--sum", "--database", "{db}", "--prescan"]],
+        argv=["--sum", "--database", "{db}", "--db-prescan"],
+        check=check_db_prescan,
+    ))
+
+    # 28. --db-prescan without a stored summary is a hard error before any
+    #     side effect -- the database file is not even created.
+    def check_db_prescan_missing(root, res, k):
+        k.expect(res.exit_code == 2,
+                 f"missing summary should exit 2, got {res.exit_code}")
+        k.expect("no stored prescan totals" in res.stderr,
+                 f"expected the run---prescan-first error, got: {res.stderr!r}")
+        k.expect(not os.path.exists(_db_for(root)),
+                 "the refusal must not create the database file")
+
+    scenarios.append(Scenario(
+        name="db_prescan_without_summary_is_exit_2",
+        description="--db-prescan errors out before side effects when no summary exists.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=64)]),
+        argv=["--sum", "--database", "{db}", "--db-prescan"],
+        check=check_db_prescan_missing,
+    ))
+
+    # 29. --db-prescan's match-or-error: a summary stored under a different
+    #     counting context (here: different --exclude patterns) is refused.
+    def check_db_prescan_mismatch(root, res, k):
+        k.expect(res.exit_code == 2,
+                 f"context mismatch should exit 2, got {res.exit_code}")
+        k.expect("--exclude patterns differ" in res.stderr,
+                 f"expected the named mismatch, got: {res.stderr!r}")
+
+    scenarios.append(Scenario(
+        name="db_prescan_context_mismatch_is_refused",
+        description="--db-prescan refuses totals stored under a different context.",
+        corpus=Corpus(files=[FileSpec("data.bin", size=64)]),
+        extra_runs=[["--sum", "--database", "{db}", "--prescan"]],
+        argv=["--sum", "--database", "{db}", "--db-prescan",
+              "--exclude", "*.zzz"],
+        check=check_db_prescan_mismatch,
+    ))
+
     return scenarios
