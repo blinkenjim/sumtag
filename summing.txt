@@ -1,0 +1,1 @@
+sudo sumtag --database ~/Data/mercury.sqlite --sum --prescan --exclude .DS_Store --exclude Library --exclude Applications --locate --progress /Volumes/mercury --exclude iTunes --exclude \*.sparsebundle --exclude \*.aplibrary --exclude \*.cocoapods
