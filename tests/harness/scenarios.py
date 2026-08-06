@@ -52,6 +52,10 @@ class Scenario:
     # Extra sumtag invocations run before the checked run (e.g. to seed a prior
     # database state). The token "{db}" is substituted in argv and extra_runs.
     extra_runs: list[list[str]] = field(default_factory=list)
+    # A second mutation hook, run AFTER extra_runs and before the checked run
+    # -- for disturbing a tree whose prior state the extra runs recorded
+    # (e.g. renaming a directory a --sum --database run already mirrored).
+    late_mutate: Callable[[Path], None] | None = None
 
 
 def _db_for(root: Path) -> str:
@@ -615,6 +619,33 @@ def catalog() -> list[Scenario]:
         argv=["--sum", "--database", "{db}", "--db-prescan",
               "--exclude", "*.zzz"],
         check=check_db_prescan_mismatch,
+    ))
+
+    # 30. A renamed directory is detected by --prune-dirs move detection
+    #     (2026-08-05): rows rewritten in place, nothing deleted, exit 1.
+    def check_move_detected(root, res, k):
+        rows = oracle.read_db(_db_for(root))
+        rels = [r.rel_path for r in rows]
+        k.expect(res.exit_code == 1,
+                 f"a detected move is stale-found, exit 1; got {res.exit_code}")
+        k.expect(any(r.endswith("photos-renamed/img.bin") for r in rels),
+                 f"rows should be rewritten under the new name; got {rels}")
+        k.expect(not any("photos/img.bin" in r and "renamed" not in r
+                         for r in rels),
+                 "no row should remain under the old name")
+        k.expect("moved:" in res.stdout, "the summary should count the move")
+
+    def _rename_photos(root):
+        os.rename(root / "photos", root / "photos-renamed")
+
+    scenarios.append(Scenario(
+        name="prune_detects_renamed_directory",
+        description="--prune-dirs matches a renamed directory and rewrites rows in place.",
+        corpus=Corpus(files=[FileSpec("photos/img.bin", size=256)]),
+        extra_runs=[["--sum", "--database", "{db}"]],
+        late_mutate=_rename_photos,
+        argv=["--prune-dirs", "--database", "{db}"],
+        check=check_move_detected,
     ))
 
     return scenarios

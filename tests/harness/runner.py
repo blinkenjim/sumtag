@@ -62,6 +62,8 @@ def run_scenario(
         for pre in scenario.extra_runs:
             subprocess.run([*sumtag_cmd, *_sub(pre), str(tree)],
                            capture_output=True, text=True, cwd=str(tree))
+        if scenario.late_mutate is not None:
+            scenario.late_mutate(tree)
 
         proc = subprocess.run(
             [*sumtag_cmd, *_sub(scenario.argv), str(tree)],
