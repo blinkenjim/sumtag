@@ -328,5 +328,104 @@ class ClassifyVerifyProperties(unittest.TestCase):
         self.assertEqual(len(outcomes), 4)
 
 
+class MatchMovedDirsTests(unittest.TestCase):
+    """The moved-directory matcher (TODO.md design, decided 2026-08-05).
+
+    Pure function over plain data: ``lost`` maps a lost directory's key to
+    its recorded residents {basename: (inode, file_mtime)}; ``found`` maps a
+    candidate directory's key to its live children in the same shape.
+    Returns (matches, ambiguous): L matches F iff EVERY recorded resident of
+    L has a child of F agreeing on all three of (basename via the dict key,
+    inode, mtime) -- the subset direction tolerates files ADDED after the
+    move, and anything less than full agreement falls back to
+    prune-plus-rescan, the safe direction.  A lost dir matching several
+    candidates, or several lost dirs claiming one candidate, is ambiguous:
+    matched nowhere, reported for exit 2.
+    """
+
+    T0 = "2026-08-01T12:00:00.000000Z"
+    T1 = "2026-08-01T12:00:01.000000Z"
+
+    def rows(self):
+        return {"f1": (100, self.T0), "f2": (101, self.T1)}
+
+    def test_exact_match(self):
+        matches, ambiguous = decide.match_moved_dirs(
+            {"old": self.rows()}, {"new": self.rows()})
+        self.assertEqual(matches, {"old": "new"})
+        self.assertEqual(ambiguous, set())
+
+    def test_subset_tolerates_files_added_after_the_move(self):
+        found = dict(self.rows(), extra=(200, self.T0))
+        matches, _ = decide.match_moved_dirs({"old": self.rows()},
+                                             {"new": found})
+        self.assertEqual(matches, {"old": "new"})
+
+    def test_missing_child_breaks_the_match(self):
+        # A file deleted after the move: not the same directory anymore --
+        # falls back to prune + rescan.
+        found = {"f1": (100, self.T0)}   # f2 gone
+        matches, ambiguous = decide.match_moved_dirs({"old": self.rows()},
+                                                     {"new": found})
+        self.assertEqual(matches, {})
+        self.assertEqual(ambiguous, set())
+
+    def test_inode_disagreement_breaks_the_match(self):
+        found = {"f1": (100, self.T0), "f2": (999, self.T1)}
+        matches, _ = decide.match_moved_dirs({"old": self.rows()},
+                                             {"new": found})
+        self.assertEqual(matches, {})
+
+    def test_mtime_disagreement_breaks_the_match(self):
+        # Inode reuse insurance: the recycled inode won't carry the exact
+        # recorded microsecond mtime.
+        found = {"f1": (100, self.T0), "f2": (101, self.T0)}  # f2 mtime off
+        matches, _ = decide.match_moved_dirs({"old": self.rows()},
+                                             {"new": found})
+        self.assertEqual(matches, {})
+
+    def test_renamed_child_breaks_the_match(self):
+        found = {"f1": (100, self.T0), "renamed": (101, self.T1)}
+        matches, _ = decide.match_moved_dirs({"old": self.rows()},
+                                             {"new": found})
+        self.assertEqual(matches, {})
+
+    def test_lost_dir_matching_two_candidates_is_ambiguous(self):
+        # Hard-link farm: two candidate dirs carry identical (inode, name,
+        # mtime) children. No guess -- ambiguous, matched nowhere.
+        matches, ambiguous = decide.match_moved_dirs(
+            {"old": self.rows()},
+            {"c1": self.rows(), "c2": self.rows()})
+        self.assertEqual(matches, {})
+        self.assertEqual(ambiguous, {"old"})
+
+    def test_two_lost_dirs_claiming_one_candidate_are_ambiguous(self):
+        matches, ambiguous = decide.match_moved_dirs(
+            {"oldA": self.rows(), "oldB": self.rows()},
+            {"new": self.rows()})
+        self.assertEqual(matches, {})
+        self.assertEqual(ambiguous, {"oldA", "oldB"})
+
+    def test_independent_moves_all_resolve(self):
+        lost = {"a": {"f": (1, self.T0)}, "b": {"g": (2, self.T0)}}
+        found = {"x": {"f": (1, self.T0)}, "y": {"g": (2, self.T0)},
+                 "unrelated": {"z": (9, self.T1)}}
+        matches, ambiguous = decide.match_moved_dirs(lost, found)
+        self.assertEqual(matches, {"a": "x", "b": "y"})
+        self.assertEqual(ambiguous, set())
+
+    def test_empty_residents_never_match(self):
+        # A rowless lost dir would match everything vacuously; refuse.
+        matches, ambiguous = decide.match_moved_dirs(
+            {"old": {}}, {"new": self.rows()})
+        self.assertEqual(matches, {})
+        self.assertEqual(ambiguous, set())
+
+    def test_no_candidates_no_matches(self):
+        matches, ambiguous = decide.match_moved_dirs({"old": self.rows()}, {})
+        self.assertEqual(matches, {})
+        self.assertEqual(ambiguous, set())
+
+
 if __name__ == "__main__":
     unittest.main()

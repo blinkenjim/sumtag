@@ -62,10 +62,6 @@ REJECTED: list[tuple[list[str], list[str]]] = [
      ["--prune-dirs", "--prescan"]),
     (["--prune-all", "--database", "x", "--db-prescan", "/d"],
      ["--prune-all"]),
-    (["--prune-dirs", "--database", "x", "--exclude", "*.vob", "/d"],
-     ["--prune-dirs", "--exclude"]),
-    (["--prune-all", "--database", "x", "--no-ignore", "/d"],
-     ["--prune-all", "--no-ignore"]),
     # Prescan pairings.
     (["--remove", "--prescan", "/d"], ["--prescan", "--remove"]),
     (["--sum", "--db-prescan", "/d"], ["--db-prescan", "--database"]),
@@ -99,6 +95,10 @@ ACCEPTED: list[list[str]] = [
     ["--prune-all", "--database", "x", "/d"],
     ["--prune-dirs", "--prune-all", "--database", "x", "/d"],   # redundant, ok
     ["--prune-dirs", "--database", "x", "-n", "/d"],
+    # Accepted since 2026-08-05: the move-detection candidate search
+    # traverses, so the traversal flags compose with the prune family.
+    ["--prune-dirs", "--database", "x", "--exclude", "*.vob", "/d"],
+    ["--prune-all", "--database", "x", "--no-ignore", "/d"],
     ["--sum", "--prescan", "/d"],
     ["--sum", "--database", "x", "--prescan", "/d"],
     ["--sum", "--database", "x", "--db-prescan", "/d"],

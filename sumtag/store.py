@@ -397,6 +397,65 @@ class SQLiteStore:
                 (row[0],))
         return sorted(r[0] for r in cur)
 
+    def iter_dir_file_rows(self, mount_path: str,
+                           dir_rel: str) -> list[tuple[str, int, str]]:
+        """The resident rows of dir_rel as (rel_path, inode, file_mtime)
+        tuples, sorted -- the recorded signature move detection matches
+        against live directories (dirname equality, same residency rule as
+        iter_dir_file_paths).
+        """
+        row = self._conn.execute(
+            "SELECT id FROM mountpoints WHERE path = ?",
+            (mount_path,)).fetchone()
+        if row is None:
+            return []
+        if dir_rel:
+            prefix = dir_rel + "/"
+            cur = self._conn.execute(
+                "SELECT rel_path, inode, file_mtime FROM files "
+                "WHERE mountpoint_id = ? "
+                "AND substr(rel_path, 1, ?) = ? "
+                "AND instr(substr(rel_path, ?), '/') = 0",
+                (row[0], len(prefix), prefix, len(prefix) + 1))
+        else:
+            cur = self._conn.execute(
+                "SELECT rel_path, inode, file_mtime FROM files "
+                "WHERE mountpoint_id = ? AND instr(rel_path, '/') = 0",
+                (row[0],))
+        return sorted(cur.fetchall())
+
+    def move_dir_files(self, mount_path: str, old_dir: str,
+                       new_dir: str) -> int:
+        """Rewrite the resident rows of old_dir under new_dir, in place --
+        the move-detection UPDATE. Resident rows only (dirname equality,
+        never recursive: a moved tree's subdirectories are independently
+        matched); everything but rel_path carries over, preserving row
+        identity. Committed immediately, one commit per directory, same as
+        the deletes. Returns the rows moved.
+        """
+        row = self._conn.execute(
+            "SELECT id FROM mountpoints WHERE path = ?",
+            (mount_path,)).fetchone()
+        if row is None:
+            return 0
+        old_prefix = old_dir + "/" if old_dir else ""
+        new_prefix = new_dir + "/" if new_dir else ""
+        if old_dir:
+            cur = self._conn.execute(
+                "UPDATE files SET rel_path = ? || substr(rel_path, ?) "
+                "WHERE mountpoint_id = ? "
+                "AND substr(rel_path, 1, ?) = ? "
+                "AND instr(substr(rel_path, ?), '/') = 0",
+                (new_prefix, len(old_prefix) + 1, row[0],
+                 len(old_prefix), old_prefix, len(old_prefix) + 1))
+        else:
+            cur = self._conn.execute(
+                "UPDATE files SET rel_path = ? || rel_path "
+                "WHERE mountpoint_id = ? AND instr(rel_path, '/') = 0",
+                (new_prefix, row[0]))
+        self._conn.commit()
+        return cur.rowcount
+
     def delete_files(self, mount_path: str, rel_paths: list[str]) -> int:
         """Delete the rows for the given rel_paths; returns the rows deleted.
         Committed immediately (one commit per call -- --prune-all calls this

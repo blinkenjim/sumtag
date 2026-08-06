@@ -349,6 +349,57 @@ class SQLiteStoreTests(unittest.TestCase):
         remaining = [r[1] for r in _read_rows(self.db)]
         self.assertEqual(remaining, ["a/f2.txt", "a/sub/deep.txt", "root.txt"])
 
+    def test_iter_dir_file_rows_returns_resident_signatures(self):
+        # The move-detection read: resident rows with (rel_path, inode,
+        # file_mtime) -- dirname equality, sorted, same residency rule as
+        # iter_dir_file_paths.
+        self._populate_tree()
+        rows = self.store.iter_dir_file_rows("/mnt/t", "a")
+        self.assertEqual([r[0] for r in rows], ["a/f1.txt", "a/f2.txt"])
+        for rel, inode, mtime in rows:
+            self.assertEqual(inode, 42)                      # as upserted
+            self.assertEqual(mtime, self.ROW["file_mtime"])
+        self.assertEqual(self.store.iter_dir_file_rows("/unknown", "a"), [])
+
+    def test_move_dir_files_rewrites_residents_only(self):
+        # The move-detection write: rel_path prefix rewritten in place for
+        # RESIDENT rows only -- a/sub/deep.txt stays, exactly the
+        # non-recursion rule delete_dir_files follows.
+        self._populate_tree()
+        moved = self.store.move_dir_files("/mnt/t", "a", "elsewhere/renamed")
+        self.store.close()
+        self.assertEqual(moved, 2)
+        rels = [r[1] for r in _read_rows(self.db)]
+        self.assertIn("elsewhere/renamed/f1.txt", rels)
+        self.assertIn("elsewhere/renamed/f2.txt", rels)
+        self.assertIn("a/sub/deep.txt", rels)                # child untouched
+        self.assertNotIn("a/f1.txt", rels)
+
+    def test_move_dir_files_handles_the_mount_root_ends(self):
+        # Moving out of the mount root ('' -> dir) and into it (dir -> '').
+        self._populate_tree()
+        self.assertEqual(self.store.move_dir_files("/mnt/t", "", "tucked"), 1)
+        self.assertEqual(self.store.move_dir_files("/mnt/t", "b", ""), 1)
+        self.store.close()
+        rels = [r[1] for r in _read_rows(self.db)]
+        self.assertIn("tucked/root.txt", rels)
+        self.assertIn("g.txt", rels)
+        self.assertNotIn("root.txt", rels)
+        self.assertNotIn("b/g.txt", rels)
+
+    def test_move_preserves_everything_but_the_path(self):
+        # Row identity is the point: digest, timestamps, locate columns all
+        # carry over -- only rel_path changes.
+        self._upsert("a/f.bin", stat=_stat(size=777, uid=42))
+        self.store.move_dir_files("/mnt/t", "a", "b")
+        self.store.close()
+        rows = _read_rows(self.db)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1], "b/f.bin")
+        self.assertEqual(rows[0][3], self.ROW["digest"])
+        self.assertEqual(rows[0][4], 777)
+        self.assertEqual(rows[0][5], 42)
+
     def test_delete_files_crosses_the_parameter_chunk_boundary(self):
         # SQLite bounds host parameters; the delete must chunk. 1200 rows
         # crosses the 500-per-statement chunk twice.

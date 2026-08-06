@@ -164,9 +164,10 @@ def validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
             parser.error(f"{prune} cannot be combined with "
                          f"--prescan/--db-prescan (nothing is checksummed; "
                          f"its own counter is built in)")
-        if args.exclude or args.no_ignore:
-            parser.error(f"{prune} walks the database, not the "
-                         f"filesystem; --exclude/--no-ignore do not apply")
+        # --exclude/--no-ignore are ALLOWED with the prune flags (changed
+        # 2026-08-05): move detection's candidate search genuinely
+        # traverses the roots, and traversal-level exclusions apply
+        # wherever traversal happens.
     if args.prescan and args.remove:
         parser.error("--prescan cannot be combined with --remove "
                      "(--remove never computes anything to prescan)")

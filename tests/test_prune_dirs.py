@@ -51,10 +51,11 @@ class PruneDirsCliTests(unittest.TestCase):
             _run(["--prune-dirs", "."])
 
     def test_conflicts(self):
+        # --exclude/--no-ignore left this list 2026-08-05: move detection's
+        # candidate search traverses, so the traversal flags now compose.
         for extra in (["--sum"], ["--import"], ["--locate"], ["--verify"],
                       ["--remove"], ["--force"], ["--prescan"],
-                      ["--db-prescan"], ["--exclude", "*.vob"],
-                      ["--no-ignore"]):
+                      ["--db-prescan"]):
             with self.assertRaises(SystemExit, msg=f"expected error: {extra}"):
                 _run(["--prune-dirs", "--database", "x"] + extra + ["."])
 
@@ -198,8 +199,10 @@ class PruneAllTests(unittest.TestCase):
         self.assertIn("no such database", err)
 
     def test_conflicts_match_prune_dirs(self):
+        # --exclude/--no-ignore left this list 2026-08-05 (move detection's
+        # candidate search traverses, so the traversal flags now compose).
         for extra in (["--sum"], ["--verify"], ["--remove"], ["--force"],
-                      ["--prescan"], ["--exclude", "*.vob"], ["--no-ignore"]):
+                      ["--prescan"]):
             with self.assertRaises(SystemExit, msg=f"expected error: {extra}"):
                 _run(["--prune-all", "--database", "x"] + extra + [self.tree])
 

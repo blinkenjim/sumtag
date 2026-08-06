@@ -46,6 +46,8 @@ class RunStats:
     pruned_dirs: int = 0    # --prune-dirs/-all: directories found gone
     pruned_files: int = 0   # --prune-dirs/-all: file rows deleted (or would-delete)
     checked_files: int = 0  # --prune-all: files individually checked
+    moved_dirs: int = 0     # --prune-dirs/-all: vanished dirs matched elsewhere
+    moved_files: int = 0    # --prune-dirs/-all: file rows rewritten in place
 
 
 class _Reporter:
@@ -254,6 +256,10 @@ def _print_summary(args, rep: _Reporter, stats: RunStats, interrupted: bool) -> 
         verb = "would prune" if args.dry_run else "pruned"
         pairs.append((verb, f"{dirs_word(stats.pruned_dirs)}, "
                             f"{plural(stats.pruned_files, 'file row')}"))
+        if stats.moved_dirs:
+            mverb = "would move" if args.dry_run else "moved"
+            pairs.append((mverb, f"{dirs_word(stats.moved_dirs)}, "
+                                 f"{plural(stats.moved_files, 'file row')}"))
         checked = dirs_word(stats.checked_dirs)
         if args.prune_all:
             checked += f", {plural(stats.checked_files, 'file')}"
@@ -575,6 +581,127 @@ def _verify(roots, args, rep: _Reporter, stats: RunStats,
     return EXIT_OK
 
 
+def _dir_children(path: str) -> dict[str, tuple[int, str]]:
+    """A live directory's regular-file children as {basename: (inode,
+    mtime_iso)} -- the signature move detection compares against recorded
+    rows. One scandir + one lstat per child; anything unstattable is simply
+    absent (which can only break a match, the safe direction)."""
+    children: dict[str, tuple[int, str]] = {}
+    with os.scandir(path) as it:
+        for entry in it:
+            try:
+                if entry.is_file(follow_symlinks=False):
+                    st = entry.stat(follow_symlinks=False)
+                    children[entry.name] = (st.st_ino,
+                                            schema.iso_utc_ns(st.st_mtime_ns))
+            except OSError:
+                continue
+    return children
+
+
+def _detect_moves(lost: list, known: set, roots, args, rep: _Reporter,
+                  store) -> tuple[dict, set]:
+    """Find where vanished directories went (--prune-dirs move detection;
+    design in TODO.md, decided 2026-08-05).
+
+    ``lost`` holds (mount, dir_rel) keys of vanished directories; ``known``
+    is every (mount, dir_rel) the database has rows for. Candidates are
+    directories with NO rows, discovered in two tiers: each lost
+    directory's own parent first (one readdir -- renames-in-place, the
+    common case, resolve here for nearly nothing), then, only if unmatched
+    lost directories remain, an announced tree-wide walk of the roots.
+    The walk uses the shared walker, so @sumtag-ignore markers and
+    --exclude apply to the candidate search exactly as they do to every
+    traversal. Candidates on a different filesystem than their mount are
+    rejected (rename(2) cannot cross devices, and inodes only compare
+    within one). Matching itself is decide.match_moved_dirs; after the
+    walk the whole pool is re-resolved, so a tier-1 match that the wider
+    pool makes ambiguous is refused rather than kept -- stricter, never
+    looser. Returns (matches, ambiguous) keyed like ``lost``.
+    """
+    lost_sigs: dict = {}
+    for key in lost:
+        mount, dir_rel = key
+        lost_sigs[key] = {
+            os.path.basename(rel): (inode, mtime)
+            for rel, inode, mtime in store.iter_dir_file_rows(mount, dir_rel)}
+
+    mount_devs: dict[str, int] = {}
+    for mount, _ in lost:
+        if mount not in mount_devs:
+            try:
+                mount_devs[mount] = os.stat(mount).st_dev
+            except OSError:
+                mount_devs[mount] = -1  # matches no real st_dev
+
+    patterns = list(args.exclude)
+    marker = os.path.join  # readability below
+
+    def consider(mount: str, rel: str, path: str, found: dict) -> None:
+        key = (mount, rel)
+        if key in known or key in found:
+            return
+        if patterns and walk._excluded_by(os.path.basename(path),
+                                          patterns) is not None:
+            return
+        if not args.no_ignore and os.path.lexists(
+                marker(path, walk.IGNORE_MARKER)):
+            return
+        try:
+            if os.lstat(path).st_dev != mount_devs.get(mount):
+                return  # different filesystem: inodes cannot compare
+            found[key] = _dir_children(path)
+        except OSError:
+            return
+
+    # Tier 1: the lost directories' parents.
+    found: dict = {}
+    parents: dict[str, tuple[str, str]] = {}
+    for mount, dir_rel in lost:
+        parent_rel = os.path.dirname(dir_rel)
+        parent_abs = os.path.join(mount, parent_rel) if parent_rel else mount
+        parents[parent_abs] = (mount, parent_rel)
+    for parent_abs, (mount, parent_rel) in parents.items():
+        try:
+            entries = [e.name for e in os.scandir(parent_abs)
+                       if e.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue  # the parent vanished too; its own check handles it
+        for name in entries:
+            rel = f"{parent_rel}/{name}" if parent_rel else name
+            consider(mount, rel, os.path.join(parent_abs, name), found)
+
+    matches, ambiguous = decide.match_moved_dirs(lost_sigs, found)
+    unmatched = [k for k in lost
+                 if k not in matches and k not in ambiguous and lost_sigs[k]]
+    if not unmatched:
+        return matches, ambiguous
+
+    # Tier 2: the announced tree-wide walk (approximation by consent --
+    # a long candidate hunt is never silent about why it is running).
+    rep.info(f"{len(unmatched)} vanished "
+             f"director{'y' if len(unmatched) == 1 else 'ies'} unmatched; "
+             f"walking roots to check for moves")
+    for root in roots:
+        root_abs = os.path.abspath(root)
+        root_mount, root_rel = store_mod.mount_relative(root)
+        root_rel = "" if root_rel == "." else root_rel
+
+        def on_dir(d: str) -> None:
+            sub = os.path.relpath(d, root_abs)
+            if sub == ".":
+                rel = root_rel
+            else:
+                rel = f"{root_rel}/{sub}" if root_rel else sub
+            consider(root_mount, rel, d, found)
+
+        for _ in walk.iter_files([root], respect_ignore=not args.no_ignore,
+                                 exclude=args.exclude, on_dir=on_dir):
+            pass  # the files themselves are irrelevant; on_dir collects
+
+    return decide.match_moved_dirs(lost_sigs, found)
+
+
 def _prune_dirs(roots, args, rep: _Reporter, stats: RunStats,
                 prune_files: bool = False) -> int:
     """Reconcile the database with a changed filesystem (--prune-dirs/-all).
@@ -649,6 +776,10 @@ def _prune_dirs(roots, args, rep: _Reporter, stats: RunStats,
         done = 0
         ind = progress_mod.make_count(total, args.progress, unit)
         try:
+            # Pass 1: classify. Surviving directories are handled on the
+            # spot (skip line, --prune-all residents); vanished ones are
+            # deferred so move detection can look at them all together.
+            lost: list[tuple[str, str]] = []
             for (mount, dir_rel), count in sorted(candidates.items()):
                 path = os.path.join(mount, dir_rel) if dir_rel else mount
                 try:
@@ -664,27 +795,73 @@ def _prune_dirs(roots, args, rep: _Reporter, stats: RunStats,
                     rep.error(f"sumtag: {path}: {e}")
                     continue
 
-                if ind is not None and (gone or args.verbose >= 1):
+                if gone:
+                    lost.append((mount, dir_rel))
+                    continue
+                if ind is not None and args.verbose >= 1:
                     ind.interrupt()
-                rows = lambda n: f"{n} file row{'' if n == 1 else 's'}"
-                if not gone:
-                    rep.detail(f"skip   {path} (exists)")
-                    if prune_files:
-                        done += _prune_dir_residents(
-                            store, mount, dir_rel, args, rep, stats, ind)
+                rep.detail(f"skip   {path} (exists)")
+                if prune_files:
+                    done += _prune_dir_residents(
+                        store, mount, dir_rel, args, rep, stats, ind)
+                stats.checked_dirs += 1
+                done += 1
+                if ind is not None:
+                    ind(done)
+
+            # The move check (TODO.md design, 2026-08-05): vanished rows
+            # whose files reappear elsewhere agreeing on (inode, basename,
+            # microsecond mtime) are rewritten in place, not deleted.
+            matches: dict = {}
+            ambiguous: set = set()
+            if lost:
+                if ind is not None:
+                    ind.interrupt()
+                matches, ambiguous = _detect_moves(
+                    lost, set(candidates), roots, args, rep, store)
+
+            # Pass 2: act on the vanished directories.
+            rows = lambda n: f"{n} file row{'' if n == 1 else 's'}"
+            for key in lost:
+                mount, dir_rel = key
+                count = candidates[key]
+                path = os.path.join(mount, dir_rel) if dir_rel else mount
+                if ind is not None:
+                    ind.interrupt()
+                if key in ambiguous:
+                    # No guess: rows kept, loudly, exit 2 (the check was
+                    # knowingly incomplete -- decided 2026-08-05).
+                    rep.error(f"sumtag: {path}: vanished directory matches "
+                              f"multiple new locations ambiguously; rows "
+                              f"kept (rescan and re-prune to resolve)")
+                    stats.errors += 1
+                elif key in matches:
+                    new_mount, new_rel = matches[key]
+                    new_path = (os.path.join(new_mount, new_rel)
+                                if new_rel else new_mount)
+                    if args.dry_run:
+                        rep.announce(f"{path} -> {new_path}",
+                                     f"would move {path} -> {new_path} "
+                                     f"({rows(count)})")
+                        moved = count
+                    else:
+                        moved = store.move_dir_files(mount, dir_rel, new_rel)
+                        rep.announce(f"{path} -> {new_path}",
+                                     f"move   {path} -> {new_path} "
+                                     f"({rows(moved)})")
+                    stats.moved_dirs += 1
+                    stats.moved_files += moved
                 elif args.dry_run:
                     rep.announce(path, f"would prune {path} ({rows(count)})")
                     stats.pruned_dirs += 1
                     stats.pruned_files += count
-                    done += count if prune_files else 0
                 else:
                     deleted = store.delete_dir_files(mount, dir_rel)
                     rep.announce(path, f"prune  {path} ({rows(deleted)})")
                     stats.pruned_dirs += 1
                     stats.pruned_files += deleted
-                    done += count if prune_files else 0
                 stats.checked_dirs += 1
-                done += 1
+                done += 1 + (count if prune_files else 0)
                 if ind is not None:
                     ind(done)
         finally:
@@ -695,7 +872,8 @@ def _prune_dirs(roots, args, rep: _Reporter, stats: RunStats,
 
     if stats.errors:
         exit_code = EXIT_ERRORS  # helper errors escalate the same way
-    if exit_code == EXIT_OK and (stats.pruned_dirs or stats.pruned_files):
+    if exit_code == EXIT_OK and (stats.pruned_dirs or stats.pruned_files
+                                 or stats.moved_dirs):
         return EXIT_CORRUPTION  # 1: something stale found -- gateable
     return exit_code
 
